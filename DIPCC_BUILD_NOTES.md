@@ -161,4 +161,50 @@ Successfully imported pydipcc module will have the following components:
 
 ## Docker Build
 
-To build dipcc in a Docker container, the Dockerfile needs to include all the necessary dependencies and build steps. See the `Dockerfile.phased` for a complete example of building dipcc in a Docker environment.
+To build dipcc in a Docker container, the Dockerfile includes all the necessary dependencies and build steps. We provide two Dockerfiles:
+
+- `Dockerfile`: Streamlined build for production use
+- `Dockerfile.phased`: Detailed step-by-step build with testing at each phase (useful for debugging)
+
+### Using Docker Compose (Recommended)
+
+The easiest way to use the Docker environment is with Docker Compose:
+
+```bash
+# Build and start the container
+docker-compose up -d
+
+# Access the running container
+docker-compose exec diplomacy bash
+
+# Test if dipcc is working correctly
+docker-compose exec diplomacy python /app/test_pydipcc.py
+```
+
+### Manual Docker Usage
+
+You can also build and run the Docker container manually:
+
+```bash
+# Build the main Docker image
+docker build -t diplomacy_cicero .
+
+# Run the container with the current directory mounted
+docker run -it -v $(pwd):/app diplomacy_cicero bash
+
+# For debugging: build the phased version
+docker build -t diplomacy_cicero_phased -f Dockerfile.phased .
+docker run -it diplomacy_cicero_phased bash
+```
+
+### Verifying the Build
+
+Once inside the Docker container, you can test if the dipcc build was successful:
+
+```bash
+# Run the test script
+python /app/test_pydipcc.py
+
+# Or try importing and using the module directly
+python -c "from fairdiplomacy import pydipcc; game = pydipcc.Game(); print(game.get_state())"
+```
