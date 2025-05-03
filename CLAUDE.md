@@ -74,3 +74,45 @@ The correct build sequence is:
 - **Protobuf**: Format with `clang-format-8 conf/*.proto -i`
 - **Documentation**: Use docstrings for functions and methods, especially for public APIs
 - **Testing**: Write pytest tests with descriptive names in unit_tests/ directory
+
+## Next Steps for Docker and Build Improvements
+
+1. **Test Cross-Platform Compatibility**:
+   - Test the build on both x86_64 and ARM64 architectures
+   - Modify module loading to dynamically detect platform-specific `.so` files
+   - Add platform-specific build options and documentation
+
+2. **Optimize Memory Usage**:
+   - Experiment with Docker build memory limits and compilation flags
+   - Create a multi-stage build to reduce final image size
+   - Add resource requirement documentation for different build configurations
+
+3. **Strengthen Protobuf Handling**:
+   - Create validation tests for protobuf compilation correctness
+   - Document protobuf version requirements more prominently
+   - Add better error handling for protobuf version mismatches
+
+4. **Improve Validation**:
+   - Expand test_pydipcc.py to validate more functionality
+   - Add tests for model loading and game state manipulation
+   - Create specific tests for Python-C++ integration points
+
+5. **Document Integration Points**:
+   - Document the relationship between dipcc and fairdiplomacy.pydipcc more clearly
+   - Create a visual diagram of module dependencies
+   - Add examples of correct import paths and usage
+
+6. **Refine Docker Workflow**:
+   - Consolidate the regular and phased Dockerfiles
+   - Add CI pipeline instructions for automated building and testing
+   - Create Docker Compose profiles for different use cases
+
+7. **Create Release Process**:
+   - Document how to create versioned Docker images
+   - Add tagging conventions for built images
+   - Test integration with model weight downloading
+
+8. **Deployment Instructions**:
+   - Add detailed instructions for deploying in production environments
+   - Document resource requirements (memory, CPU, GPU)
+   - Include performance optimization guidelines
