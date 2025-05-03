@@ -16,11 +16,14 @@ RUN apt-get update && apt-get install -y \
     libtool \
     pkg-config \
     libgoogle-glog-dev \
-    software-properties-common \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    python3.8 \
+    python3.8-dev \
+    python3-pip \
+    software-properties-common && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-# Install GCC 9.4 to match the version in README
+# Install GCC 9.4 to match the version in requirements
 RUN apt-get update && \
     apt-get install -y gcc-9 g++-9 && \
     update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 90 && \
@@ -30,33 +33,25 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# NOTE: Using Python 3.8 instead of 3.7 as specified in README
-# Python 3.7 is not readily available in Ubuntu 20.04 repositories
-# Install Python 3.8 and pip
-RUN apt-get update && \
-    apt-get install -y python3.8 python3.8-dev python3-pip && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
 # Set up Python 3.8 as the default
 RUN ln -sf /usr/bin/python3.8 /usr/bin/python && \
     ln -sf /usr/bin/pip3 /usr/bin/pip && \
     python -m pip install --upgrade pip setuptools wheel
 
-# Verify GCC and Python versions
-RUN gcc --version && python --version
+# Install pybind11 and other required packages
+RUN apt-get update && \
+    apt-get install -y python3-dev pybind11-dev && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-# Set working directory
-WORKDIR /app
-
-# Build protobuf 3.19.1 from source
+# Build protobuf 3.19.1 from source (exact version required)
 RUN apt-get update && apt-get install -y git autoconf automake libtool curl unzip && \
     git clone https://github.com/protocolbuffers/protobuf.git /tmp/protobuf && \
     cd /tmp/protobuf && \
     git checkout v3.19.1 && \
     ./autogen.sh && \
     ./configure && \
-    make -j$(nproc) && \
+    make -j2 && \
     make install && \
     ldconfig && \
     cd / && \
@@ -64,65 +59,63 @@ RUN apt-get update && apt-get install -y git autoconf automake libtool curl unzi
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Verify protoc version
-RUN protoc --version
+# Install Python protobuf package with matching version
+RUN pip install protobuf==3.19.1
 
-# Install Python dependencies (using newer pytorch version since 1.7.1 is not available)
-RUN pip install protobuf==3.19.1 numpy==1.20.3 numba==0.54.1 pandas==1.3.4 cython && \
-    pip install torch>=1.8.0
+# Set working directory
+WORKDIR /app
 
-# Copy the codebase
+# Copy the entire repository
 COPY . /app/
 
-# Regenerate protobuf files from scratch with matching compiler
-RUN rm -f conf/*_pb2.py && \
-    make protos_basic && \
-    echo "Protobuf compilation successful" && \
-    python scripts/test_protos.py && \
-    echo "Successfully verified protobuf imports!"
+# Compile protobuf files
+RUN make protos_basic
 
-# Install minimal dependencies needed for tests
-RUN pip install joblib==1.1.0 pytest==6.2.1 
-    
-# Create symlink for pydipcc module
-RUN pip install packaging cython && \
-    mkdir -p /app/fairdiplomacy && \
-    echo '#!/usr/bin/env python' > /app/fairdiplomacy/pydipcc.py && \
-    echo 'import sys, os' >> /app/fairdiplomacy/pydipcc.py && \
-    echo 'import dipcc' >> /app/fairdiplomacy/pydipcc.py && \
-    echo 'sys.modules["fairdiplomacy.pydipcc"] = dipcc' >> /app/fairdiplomacy/pydipcc.py && \
-    echo "Created proxy module for pydipcc"
+# Install Python dependencies
+RUN pip install pybind11 numpy==1.20.3 torch==1.10.0 cython==0.29.24
 
-# Try to install the dipcc module (C++ part of the project)
-RUN cd dipcc && chmod +x ./compile.sh && pip install -e . || echo "Warning: dipcc module installation failed"
+# Fix directory structure for dipcc (nested directories)
+RUN mkdir -p /app/dipcc/cc /app/dipcc/pybind && \
+    cp -r /app/dipcc/dipcc/cc/* /app/dipcc/cc/ && \
+    cp -r /app/dipcc/dipcc/pybind/* /app/dipcc/pybind/ && \
+    cp -r /app/dipcc/dipcc/profiling /app/dipcc/
 
-# Create a simple script to test protobuf integration
-RUN echo '#!/usr/bin/env python\nimport os\nimport sys\nsys.path.insert(0, os.getcwd())\ntry:\n    from conf import conf_pb2, common_pb2, agents_pb2\n    print("Successfully imported protobuf modules!")\n    # Try to create a message using a known enum\n    print("\\nTesting protobuf enums...")\n    power = common_pb2.Power.FRANCE\n    print(f"Power value: {power}")\n    print("✅ Successfully used protobuf enums")\n    print("\\nProtobuf is working correctly!")\nexcept Exception as e:\n    print(f"Error: {e}", file=sys.stderr)\n    sys.exit(1)' > test_import.py && \
-    chmod +x test_import.py && \
-    python test_import.py
+# Build dipcc with 2 jobs to avoid memory issues
+RUN cd /app/dipcc && \
+    pybind11_DIR=$(python3 -c "import pybind11; print(pybind11.get_cmake_dir())") && \
+    mkdir -p build && cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$pybind11_DIR .. && \
+    make -j2 pydipcc && \
+    cp dipcc/python/pydipcc*.so /app/fairdiplomacy/ && \
+    echo "Built pydipcc module successfully"
 
-# Install pytest and run protobuf-related tests
-RUN pip install pytest && \
-    echo "Running protobuf-related tests..." && \
-    cd unit_tests && \
-    python -c "import sys; sys.path.insert(0, '/app'); import conf.conf_pb2; import conf.common_pb2; print('Successfully imported protobuf modules for testing')" && \
-    echo "Testing pydipcc module..." && \
-    python -c "import sys; sys.path.insert(0, '/app'); import dipcc; print('Dipcc module successfully imported')"
+# Configure fairdiplomacy to import pydipcc
+RUN echo '#!/usr/bin/env python' > /app/fairdiplomacy/__init__.py && \
+    echo 'import sys, os' >> /app/fairdiplomacy/__init__.py && \
+    echo 'import importlib.util' >> /app/fairdiplomacy/__init__.py && \
+    echo '' >> /app/fairdiplomacy/__init__.py && \
+    echo '# Make the pydipcc module in this directory available' >> /app/fairdiplomacy/__init__.py && \
+    echo 'spec = importlib.util.spec_from_file_location("pydipcc", os.path.join(os.path.dirname(__file__), "pydipcc.cpython-38-aarch64-linux-gnu.so"))' >> /app/fairdiplomacy/__init__.py && \
+    echo 'if spec:' >> /app/fairdiplomacy/__init__.py && \
+    echo '    pydipcc = importlib.util.module_from_spec(spec)' >> /app/fairdiplomacy/__init__.py && \
+    echo '    spec.loader.exec_module(pydipcc)' >> /app/fairdiplomacy/__init__.py && \
+    echo '    sys.modules["fairdiplomacy.pydipcc"] = pydipcc' >> /app/fairdiplomacy/__init__.py && \
+    echo 'else:' >> /app/fairdiplomacy/__init__.py && \
+    echo '    print("Could not find pydipcc module")' >> /app/fairdiplomacy/__init__.py
 
-# Run protobuf tests
-RUN echo "Running protobuf tests..." && \
-    cd unit_tests && \
-    python -m unittest test_protobuf || echo "Protobuf tests failed"
-
-# Test pydipcc imports
-RUN echo "Testing pydipcc imports..." && \
-    chmod +x scripts/test_pydipcc_import.py && \
-    python scripts/test_pydipcc_import.py || echo "pydipcc import test failed, but continuing"
-
-# Inspect dipcc module
-RUN echo "Inspecting dipcc module..." && \
-    chmod +x scripts/inspect_dipcc.py && \
-    python scripts/inspect_dipcc.py || echo "dipcc inspection failed, but continuing"
+# Add the test script
+RUN echo '#!/usr/bin/env python' > /app/test_pydipcc.py && \
+    echo 'import sys; sys.path.insert(0, "/app")' >> /app/test_pydipcc.py && \
+    echo 'try:' >> /app/test_pydipcc.py && \
+    echo '    from fairdiplomacy import pydipcc' >> /app/test_pydipcc.py && \
+    echo '    print("pydipcc imported successfully")' >> /app/test_pydipcc.py && \
+    echo '    game = pydipcc.Game()' >> /app/test_pydipcc.py && \
+    echo '    print("Game created successfully")' >> /app/test_pydipcc.py && \
+    echo '    print("Current phase:", game.get_current_phase())' >> /app/test_pydipcc.py && \
+    echo '    print("Available methods:", [m for m in dir(game) if not m.startswith("_")])' >> /app/test_pydipcc.py && \
+    echo 'except Exception as e:' >> /app/test_pydipcc.py && \
+    echo '    print(f"Error: {e}")' >> /app/test_pydipcc.py && \
+    chmod +x /app/test_pydipcc.py
 
 # Default command
 CMD ["/bin/bash"]

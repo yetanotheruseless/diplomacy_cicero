@@ -13,13 +13,48 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## System Requirements
 - Docker (recommended)
 - Alternatively:
-  - Protocol Buffer Compiler (protoc): `brew install protobuf` (macOS) or `apt-get install protobuf-compiler` (Ubuntu)
-  - CMake: `brew install cmake` (macOS) or `apt-get install cmake` (Ubuntu)
-  - C++ compiler with C++11 support
+  - Protocol Buffer Compiler (protoc) version 3.19.1 exactly
+  - CMake 3.10+
+  - GCC 9.4+ with C++17 support
+  - Python 3.7 or 3.8
+
+## Diplomacy Cicero Build Process
+See [DIPCC_BUILD_NOTES.md](./DIPCC_BUILD_NOTES.md) for detailed instructions on building the C++ components.
+
+### Build Dependencies
+1. **Protocol Buffers**: Used for configuration and serialization
+   - Version 3.19.1 must be built from source to avoid compatibility issues
+   - Required for parsing `.proto` files in the `conf/` directory
+   
+2. **dipcc**: C++ implementation of the Diplomacy game logic
+   - Located in the `dipcc/` directory
+   - Compiles to a shared library
+   - Provides Python bindings via pybind11
+   
+3. **fairdiplomacy**: Python module that depends on dipcc
+   - Imports dipcc as `fairdiplomacy.pydipcc`
+   
+4. **parlai_diplomacy**: Modified ParlAI framework for dialogue generation
+
+### Build Order
+The correct build sequence is:
+1. Install system dependencies
+2. Build protobuf 3.19.1 from source
+3. Compile `.proto` files to Python modules
+4. Compile dipcc C++ library and Python bindings
+5. Install Python dependencies
+6. Install the Python package
+
+### Common Issues
+- Protocol buffer syntax errors with protobuf versions other than 3.19.1
+- Import errors between dipcc and fairdiplomacy.pydipcc
+- C++ compilation failures due to GCC version incompatibility
+- CUDA/GPU acceleration configuration issues
 
 ## Build & Testing Commands
 - Compile and build: `make compile`
 - Compile protobuf only: `make protos_basic`
+- Compile dipcc only: `cd dipcc && ./compile.sh`
 - Run all tests: `make test`
 - Run fast tests: `make test_fast`
 - Run single test: `python -m pytest path/to/test.py::test_function -v`
@@ -30,6 +65,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Code Style Guidelines
 - **Python**: 3.7+ with static typing
+- **C++**: C++17 with pybind11 for Python bindings
 - **Formatting**: Use black with line length of 99 (`black . --line-length=99`)
 - **Imports**: Standard first, third-party next, project imports last, separated by blank lines
 - **Naming**: snake_case for variables/functions, PascalCase for classes
