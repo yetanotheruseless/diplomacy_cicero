@@ -24,7 +24,16 @@ fields from extra_fields() function.
 
 from collections import defaultdict
 import sys
-from google.protobuf import message as _message
+
+try:
+    from google.protobuf import message as _message
+except ImportError:
+    print("Warning: google.protobuf not found, trying to continue without it")
+    # Create a dummy _message for now so the script can continue
+    class DummyMessage:
+        class Message:
+            pass
+    _message = DummyMessage()
 
 import abc
 import importlib

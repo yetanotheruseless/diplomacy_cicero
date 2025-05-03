@@ -1,0 +1,17 @@
+services:
+  diplomacy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      # Mount your local code to allow for development
+      - .:/app
+      # Mount a volume for model files (which are downloaded separately)
+      - diplomacy_models:/app/models
+    # Keep the container running
+    stdin_open: true
+    tty: true
+
+volumes:
+  diplomacy_models:
+    # Persistent volume for downloaded model files

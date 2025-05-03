@@ -31,6 +31,59 @@ You can play the game online on [webDiplomacy](https://webdiplomacy.net/) either
 
 ### Installation
 
+#### Docker Method (Recommended)
+The most reliable way to set up the environment is using Docker, which provides a consistent Ubuntu-based environment:
+
+```bash
+# Build the Docker image
+./scripts/docker_build.sh
+
+# Run a container
+./scripts/docker_run.sh
+```
+
+This will create a Docker container with all dependencies properly installed and the codebase ready to use.
+
+#### Alternative Methods
+
+We also provide several alternative setup methods:
+
+1. Using conda (recommended for Linux/Ubuntu systems):
+   ```bash
+   # Run the conda setup script
+   ./scripts/setup_conda_env.sh
+   
+   # Activate the environment
+   conda activate diplomacy_cicero
+   ```
+
+2. Using `uv` (faster dependency resolution):
+   ```bash
+   # Install uv if not already available
+   pip install uv
+   
+   # Run the setup script
+   ./scripts/setup_env.sh
+   
+   # Activate the environment
+   source .venv/bin/activate
+   ```
+
+3. Using standard pip:
+   ```bash
+   # Run the setup script
+   ./scripts/setup_env_pip.sh
+   
+   # Activate the environment
+   source .venv/bin/activate
+   ```
+
+Note: You need to have the Protocol Buffer Compiler (protoc) installed:
+- On macOS: `brew install protobuf`
+- On Ubuntu: `apt-get install protobuf-compiler`
+
+#### Original Method
+
 Most of the code of the project implemented in Python with some parts in C++. The snippet below show how to install and build all required components within a conda environment on Ubuntu system. You would need C++ compiler with C++11 support. We use gcc 9.4.
 
 ```
