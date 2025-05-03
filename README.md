@@ -35,14 +35,27 @@ You can play the game online on [webDiplomacy](https://webdiplomacy.net/) either
 The most reliable way to set up the environment is using Docker, which provides a consistent Ubuntu-based environment:
 
 ```bash
-# Build the Docker image
-./scripts/docker_build.sh
+# Build and start the container using Docker Compose
+docker-compose up -d
 
-# Run a container
-./scripts/docker_run.sh
+# Access the running container
+docker-compose exec diplomacy bash
+
+# Test if dipcc (C++ game engine) is working correctly
+docker-compose exec diplomacy python /app/test_pydipcc.py
 ```
 
-This will create a Docker container with all dependencies properly installed and the codebase ready to use.
+Alternatively, you can use the Docker image directly:
+
+```bash
+# Build the Docker image
+docker build -t diplomacy_cicero .
+
+# Run a container with the current directory mounted
+docker run -it -v $(pwd):/app diplomacy_cicero bash
+```
+
+This will create a Docker container with all dependencies properly installed, including the C++ components (dipcc), with the codebase ready to use. See [DIPCC_BUILD_NOTES.md](DIPCC_BUILD_NOTES.md) for detailed information about the C++ build process.
 
 #### Alternative Methods
 
