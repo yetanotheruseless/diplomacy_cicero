@@ -2,6 +2,8 @@
 
 This document provides detailed information about building the C++ components of the Diplomacy Cicero project, specifically the dipcc module which powers the core game logic.
 
+> **Note:** For a detailed explanation of how the dipcc C++ library integrates with the Python codebase through fairdiplomacy.pydipcc, see [docs/dipcc_integration.md](docs/dipcc_integration.md) and [docs/module_dependencies.md](docs/module_dependencies.md).
+
 ## Directory Structure
 
 The dipcc C++ code has a nested directory structure:

@@ -1,8 +1,12 @@
 services:
+  # Main service using the unified Dockerfile
   diplomacy:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.unified
+      args:
+        # Can be adjusted based on available memory
+        DIPCC_BUILD_JOBS: 2
     volumes:
       # Mount your local code to allow for development
       - .:/app
@@ -11,6 +15,20 @@ services:
     # Keep the container running
     stdin_open: true
     tty: true
+    # Environment variables
+    environment:
+      - PYTHONPATH=/app
+  
+  # Lighter version for testing only
+  diplomacy_test:
+    build:
+      context: .
+      dockerfile: Dockerfile.unified
+      target: test
+    volumes:
+      - .:/app
+    # Command to run tests
+    command: python /app/test_pydipcc.py
 
 volumes:
   diplomacy_models:

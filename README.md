@@ -32,10 +32,16 @@ You can play the game online on [webDiplomacy](https://webdiplomacy.net/) either
 ### Installation
 
 #### Docker Method (Recommended)
-The most reliable way to set up the environment is using Docker, which provides a consistent Ubuntu-based environment:
+The most reliable way to set up the environment is using Docker with our unified build system, which provides a consistent Ubuntu-based environment:
 
 ```bash
-# Build and start the container using Docker Compose
+# Build with default settings
+./scripts/docker_build.sh
+
+# Build with custom settings (adjust for your system)
+./scripts/docker_build.sh --jobs 4 --memory 8g
+
+# Start the container
 docker-compose up -d
 
 # Access the running container
@@ -45,17 +51,50 @@ docker-compose exec diplomacy bash
 docker-compose exec diplomacy python /app/test_pydipcc.py
 ```
 
+The build script supports several options:
+- `--file`: Specify which Dockerfile to use (default: Dockerfile.unified)
+- `--jobs`: Number of parallel build jobs for C++ compilation (default: 2)
+- `--memory`: Memory limit for build (e.g., 4g for 4GB)
+
+You can get recommended build settings for your specific hardware:
+
+```bash
+# Get platform-specific build recommendations
+./scripts/detect_platform.sh
+```
+
+For cross-platform compatibility testing (x86_64 and ARM64):
+
+```bash
+# Test Docker build on multiple platforms
+./scripts/test_cross_platform.sh
+```
+
+For detailed information about the Docker build system, see:
+- [docs/unified_docker.md](docs/unified_docker.md) - Unified Docker build system documentation
+- [docs/docker_release.md](docs/docker_release.md) - Docker release process and versioning
+- [docs/dipcc_integration.md](docs/dipcc_integration.md) - Integration between C++ and Python components
+
 Alternatively, you can use the Docker image directly:
 
 ```bash
 # Build the Docker image
-docker build -t diplomacy_cicero .
+docker build -t diplomacy_cicero -f Dockerfile.unified .
 
 # Run a container with the current directory mounted
 docker run -it -v $(pwd):/app diplomacy_cicero bash
 ```
 
 This will create a Docker container with all dependencies properly installed, including the C++ components (dipcc), with the codebase ready to use. See [DIPCC_BUILD_NOTES.md](DIPCC_BUILD_NOTES.md) for detailed information about the C++ build process.
+
+#### Architecture and Module Integration
+
+For detailed documentation on how the C++ components (dipcc) integrate with the Python codebase:
+
+- [dipcc_integration.md](docs/dipcc_integration.md) - Explains the relationship between dipcc and fairdiplomacy.pydipcc
+- [module_dependencies.md](docs/module_dependencies.md) - Visual diagrams of module dependencies
+- [DOCKER_GUIDE.md](DOCKER_GUIDE.md) - Guide for using Docker with this codebase
+- [DOCKER_USAGE.md](DOCKER_USAGE.md) - Instructions for development in the Docker environment
 
 #### Alternative Methods
 

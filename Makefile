@@ -1,6 +1,6 @@
 POSTMAN_DIR=$(realpath thirdparty/github/fairinternal/postman/)
 
-.PHONY: all compile clean dipcc protos selfplay check_deps protos_basic
+.PHONY: all compile clean dipcc protos selfplay check_deps protos_basic validate_protos
 
 all: compile
 
@@ -43,6 +43,11 @@ protos:
 protos_basic:
 	@echo "Compiling protocol buffers without mypy support..."
 	protoc conf/*.proto --python_out ./
+	@echo "To validate protobuf compilation, run: python scripts/validate_protobuf.py"
+
+validate_protos: | protos_basic
+	@echo "Validating protocol buffer compilation..."
+	python scripts/validate_protobuf.py
 
 test: | test_fast test_cc
 
