@@ -49,6 +49,9 @@ docker-compose exec diplomacy bash
 
 # Test if dipcc (C++ game engine) is working correctly
 docker-compose exec diplomacy python /app/test_pydipcc.py
+
+# Verify the full build is working end-to-end
+docker-compose exec diplomacy ./scripts/verify_full_build.sh
 ```
 
 The build script supports several options:

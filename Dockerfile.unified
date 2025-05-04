@@ -175,10 +175,21 @@ RUN echo "✅ Final environment verification:" && \
     echo "  Platform: $(python -c 'import platform; print(platform.platform())')" && \
     echo "  Architecture: $(python -c 'import platform; print(platform.machine())')" && \
     echo "  Shared object files:" && \
-    find /app -name "*.so" | grep -i pydipcc || echo "  ⚠️ No pydipcc.so files found" && \
+    find /app -name "*.so" | grep -i pydipcc || echo "  ⚠️ No pydipcc.so files found"
+
+# PHASE 8: Full build verification
+# ==============================================
+RUN echo "✅ Running comprehensive build verification..." && \
+    chmod +x /app/scripts/verify_full_build.sh && \
+    if /app/scripts/verify_full_build.sh; then \
+        echo "  ✓ Full build verification PASSED"; \
+    else \
+        echo "  ⚠️ Full build verification failed but continuing build"; \
+    fi && \
     echo "" && \
     echo "✅ Build complete! Use the following to test the environment:" && \
-    echo "  python /app/test_pydipcc.py"
+    echo "  python /app/test_pydipcc.py" && \
+    echo "  ./scripts/verify_full_build.sh --full-test"
 
 # Default command
 CMD ["/bin/bash"]
