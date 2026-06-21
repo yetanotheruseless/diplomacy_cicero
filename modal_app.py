@@ -390,10 +390,12 @@ def main(mode: str = "cicero", power: str = "", max_turns: str = "1"):
 # DESIGN §3). diplodocus_* need a one-time `fetch_models` download of their 3 ckpts
 # (not on the Volume by default).
 TIER_PRESETS = {
+    # "imitation-only" = Cicero with imitation orders + dialogue but no RL search
+    # (the cicero_imitation_only ablation), i.e. a full-press tier.
     "imitation": dict(
-        config="conf/common/agents/base_strategy_model.prototxt",
+        config="conf/common/agents/ablations/cicero_imitation_only.prototxt",
         value="models/rl_value_function.ckpt",
-        overrides=["base_strategy_model.model_path=models/rl_search_orders.ckpt"],
+        overrides=[],
     ),
     "searchbot": dict(
         config="conf/common/agents/searchbot.prototxt",
@@ -462,9 +464,14 @@ def _oracle_cmd(tiers, port, token):
             args += ["--value-model", f"{tier}={preset['value']}"]
         for ov in preset.get("overrides", []):
             args += ["--override", f"{tier}:{ov}"]
-    # Token via env so it never lands in `ps`/logs.
+    # Token via env so it never lands in `ps`/logs. The extra pip deps are the
+    # same ParlAI runtime closure the main/game entrypoints install — required for
+    # full-press (dialogue) tiers, harmless for no-press.
     quoted = " ".join(args)
-    return f"cd /app && PYTHONPATH=/app ORACLE_TOKEN={token} OMP_NUM_THREADS=8 {quoted}"
+    return (
+        "cd /app && pip install -q six regex sh nltk websocket-client && "
+        f"PYTHONPATH=/app ORACLE_TOKEN={token} OMP_NUM_THREADS=8 {quoted}"
+    )
 
 
 # Standard S1901M opening in Cicero format (emitted by `dip dump-positions`),
@@ -516,8 +523,11 @@ def _inline_smoke(url, token, tiers, full_press):
             print(f"[smoke][policy][{tier}] top3 -> {[(p['orders'], round(p['prob'],3)) for p in pol['policy']]}")
         except Exception as e:
             print(f"[smoke][policy][{tier}] skipped: {e}")
-        val = _rpc(url, token, "value", {"game_json": game, "tier": tier})
-        print(f"[smoke][value][{tier}] -> {json.dumps({k: round(v,4) for k,v in val['value'].items()})}")
+        try:
+            val = _rpc(url, token, "value", {"game_json": game, "tier": tier})
+            print(f"[smoke][value][{tier}] -> {json.dumps({k: round(v,4) for k,v in val['value'].items()})}")
+        except Exception as e:
+            print(f"[smoke][value][{tier}] skipped: {e}")
         if full_press:
             msg = _rpc(url, token, "generate_message",
                        {"game_json": game, "power": "FRANCE", "recipient": "ENGLAND", "tier": tier})
