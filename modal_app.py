@@ -18,14 +18,23 @@ Usage:
   modal run modal_app.py::smoke                 # verify imports + pydipcc + GPU
   modal run modal_app.py::run_cicero            # full Cicero, Turkey, 1 turn
   modal run modal_app.py::run_cicero --mode policy --power AUSTRIA --max-turns 1
+  modal run modal_app.py::serve --tiers searchbot,diplodocus_high   # tactics oracle
 """
 import os
 import pathlib
+import secrets
 import subprocess
 
 import modal
 
 REPO = pathlib.Path(__file__).parent
+
+# The agentic-diplomacy oracle bridge lives in a sibling repo. `serve` stages its
+# four sidecar files (flat) into the serving image and runs the HTTP front. Point
+# AGENTIC_ORACLE_DIR at a different checkout if it isn't the default sibling path.
+ORACLE_SRC = pathlib.Path(
+    os.environ.get("AGENTIC_ORACLE_DIR", str(REPO.parent / "agentic-diplomacy" / "oracle"))
+)
 
 # Files/dirs that must NOT go into the image build context.
 IGNORE = [
@@ -361,3 +370,127 @@ def main(mode: str = "cicero", power: str = "", max_turns: str = "1"):
         outp = pathlib.Path(f"modal_cicero_{mode}_output.json")
         outp.write_text(game_json)
         print("wrote", outp, len(game_json), "bytes")
+
+
+# --- tactics oracle: a warm HTTP front for the agentic-diplomacy MCP bridge ----
+#
+# `serve` boots a long-lived Sandbox running the agentic-diplomacy oracle HTTP
+# front (oracle/server/oracle_server.py --transport http) over a Modal tunnel.
+# The agentic-diplomacy MCP registry points an `http` tier at the printed URL +
+# token (OracleClient.modal(url, token)). This is Option A of TACTICS_SERVING_
+# DESIGN.md: simplest, warm GPU, no Python-3.9 jail issue (a Sandbox just exec's).
+#
+# Per-tier config: prototxt + value ckpt + search-budget overrides. Checkpoint
+# names mirror what the cicero-models Volume holds; adjust to the actual volume
+# contents (this whole entrypoint is gated on a live GPU smoke — see
+# agentic-diplomacy/evals/README.md).
+TIER_PRESETS = {
+    "imitation": dict(
+        config="conf/common/agents/base_strategy_model.prototxt",
+        value="models/human_sl_value_function.ckpt",
+        overrides=[],
+    ),
+    "searchbot": dict(
+        config="conf/common/agents/searchbot.prototxt",
+        value="models/rl_value_function.ckpt",
+        overrides=["searchbot.n_rollouts=64"],
+    ),
+    "diplodocus_high": dict(
+        config="conf/common/agents/diplodocus_high.prototxt",
+        value="models/diplodocus_high_rl_value_function.ckpt",
+        overrides=["bqre1p.base_searchbot_cfg.n_rollouts=64"],
+    ),
+    "diplodocus_low": dict(
+        config="conf/common/agents/diplodocus_low.prototxt",
+        value="models/diplodocus_low_value_function.ckpt",
+        overrides=["bqre1p.base_searchbot_cfg.n_rollouts=64"],
+    ),
+    "cicero": dict(
+        config="conf/common/agents/cicero.prototxt",
+        value="models/rl_value_function.ckpt",
+        overrides=[],
+    ),
+}
+
+# Files staged FLAT into /opt/oracle so oracle_server.py's sibling imports
+# (`import schema`, `from service/cicero_backend import ...`) resolve — mirroring
+# the local container's /tmp/oracle flat staging.
+ORACLE_FILES = [
+    ("schema.py", "schema.py"),
+    ("server/service.py", "service.py"),
+    ("server/cicero_backend.py", "cicero_backend.py"),
+    ("server/oracle_server.py", "oracle_server.py"),
+]
+
+
+def _serving_image():
+    """The Cicero image with the oracle sidecar files baked in (flat) at /opt/oracle."""
+    img = image
+    for src_rel, dst_name in ORACLE_FILES:
+        src = ORACLE_SRC / src_rel
+        if not src.exists():
+            raise FileNotFoundError(
+                f"oracle source {src} not found; set AGENTIC_ORACLE_DIR to the "
+                "agentic-diplomacy/oracle directory"
+            )
+        img = img.add_local_file(str(src), f"/opt/oracle/{dst_name}", copy=True)
+    return img
+
+
+def _oracle_cmd(tiers, port, token):
+    """Build the `oracle_server.py --transport http` argv for the given tiers."""
+    args = [
+        "python", "-u", "/opt/oracle/oracle_server.py",
+        "--transport", "http", "--host", "0.0.0.0", "--port", str(port),
+        "--device", "cuda",
+    ]
+    for tier in tiers:
+        preset = TIER_PRESETS[tier]
+        args += ["--agent", f"{tier}={preset['config']}"]
+        if preset.get("value"):
+            args += ["--value-model", f"{tier}={preset['value']}"]
+        for ov in preset.get("overrides", []):
+            args += ["--override", f"{tier}:{ov}"]
+    # Token via env so it never lands in `ps`/logs.
+    quoted = " ".join(args)
+    return f"cd /app && PYTHONPATH=/app ORACLE_TOKEN={token} OMP_NUM_THREADS=8 {quoted}"
+
+
+@app.local_entrypoint()
+def serve(tiers: str = "searchbot", port: int = 8000, gpu: str = "A10G",
+          timeout: int = 3600, token: str = ""):
+    """Serve the agentic-diplomacy oracle HTTP front over a Modal tunnel.
+
+    tiers:   comma-separated subset of TIER_PRESETS to load into one process
+             (no-press tiers are light and co-resident; use a dedicated A100
+             `serve` for `cicero`, e.g. --tiers cicero --gpu A100-80GB).
+    Prints the tunnel URL + bearer token; wire them into the MCP registry as an
+    `http` tier. The box stays up for `timeout` seconds (warm GPU); Ctrl-C ends it.
+    """
+    import time
+
+    tier_list = [t.strip() for t in tiers.split(",") if t.strip()]
+    unknown = [t for t in tier_list if t not in TIER_PRESETS]
+    if unknown:
+        raise ValueError(f"unknown tiers {unknown}; choose from {sorted(TIER_PRESETS)}")
+    token = token or secrets.token_urlsafe(24)
+
+    sb = modal.Sandbox.create(
+        app=app, image=_serving_image(), gpu=gpu, volumes=VOL,
+        encrypted_ports=[port], timeout=timeout, cpu=8.0, memory=49152,
+    )
+    try:
+        proc = sb.exec("bash", "-lc", _oracle_cmd(tier_list, port, token))
+        url = sb.tunnels()[port].url
+        print("=" * 72)
+        print(f"oracle serving tiers={tier_list} gpu={gpu}")
+        print(f"  URL:   {url}")
+        print(f"  TOKEN: {token}")
+        print("  MCP registry tier spec:")
+        print(f'    {{"transport": "http", "url": "{url}", "token_env": "ORACLE_TOKEN"}}')
+        print("  (export ORACLE_TOKEN=<token> where the MCP server runs)")
+        print("=" * 72, flush=True)
+        # Stream the server's logs until the sandbox times out or is interrupted.
+        _stream(proc)
+    finally:
+        sb.terminate()
