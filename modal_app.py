@@ -384,16 +384,27 @@ def main(mode: str = "cicero", power: str = "", max_turns: str = "1"):
 # names mirror what the cicero-models Volume holds; adjust to the actual volume
 # contents (this whole entrypoint is gated on a live GPU smoke — see
 # agentic-diplomacy/evals/README.md).
+# Checkpoints reference the cicero-models Volume. searchbot/imitation point at the
+# RL nets (rl_search_orders.ckpt) rather than the absent blueprint.pt — i.e. the
+# "searchbot fed by RL nets" that is Cicero's own tactical core (TACTICS_SERVING_
+# DESIGN §3). diplodocus_* need a one-time `fetch_models` download of their 3 ckpts
+# (not on the Volume by default).
 TIER_PRESETS = {
     "imitation": dict(
         config="conf/common/agents/base_strategy_model.prototxt",
-        value="models/human_sl_value_function.ckpt",
-        overrides=[],
+        value="models/rl_value_function.ckpt",
+        overrides=["base_strategy_model.model_path=models/rl_search_orders.ckpt"],
     ),
     "searchbot": dict(
         config="conf/common/agents/searchbot.prototxt",
         value="models/rl_value_function.ckpt",
-        overrides=["searchbot.n_rollouts=64"],
+        overrides=[
+            # rl_search_orders is policy-only; the CFR rollouts need a value head,
+            # so point value_model_path at the RL value net (mirrors cicero.prototxt).
+            "searchbot.model_path=models/rl_search_orders.ckpt",
+            "searchbot.value_model_path=models/rl_value_function.ckpt",
+            "searchbot.n_rollouts=8",
+        ],
     ),
     "diplodocus_high": dict(
         config="conf/common/agents/diplodocus_high.prototxt",
@@ -456,18 +467,81 @@ def _oracle_cmd(tiers, port, token):
     return f"cd /app && PYTHONPATH=/app ORACLE_TOKEN={token} OMP_NUM_THREADS=8 {quoted}"
 
 
+# Standard S1901M opening in Cicero format (emitted by `dip dump-positions`),
+# used by the inline `serve --smoke` check.
+_OPENING_GAME = {
+    "id": "smoke", "is_full_press": False, "map": "standard",
+    "phases": [{"messages": {}, "name": "S1901M", "orders": {}, "state": {
+        "centers": {"AUSTRIA": ["BUD", "TRI", "VIE"], "ENGLAND": ["EDI", "LON", "LVP"],
+                    "FRANCE": ["BRE", "MAR", "PAR"], "GERMANY": ["BER", "KIE", "MUN"],
+                    "ITALY": ["NAP", "ROM", "VEN"], "RUSSIA": ["MOS", "SEV", "STP", "WAR"],
+                    "TURKEY": ["ANK", "CON", "SMY"]},
+        "name": "S1901M",
+        "units": {"AUSTRIA": ["A BUD", "A VIE", "F TRI"], "ENGLAND": ["A LVP", "F EDI", "F LON"],
+                  "FRANCE": ["A MAR", "A PAR", "F BRE"], "GERMANY": ["A BER", "A MUN", "F KIE"],
+                  "ITALY": ["A ROM", "A VEN", "F NAP"], "RUSSIA": ["A MOS", "A WAR", "F SEV", "F STP/SC"],
+                  "TURKEY": ["A CON", "A SMY", "F ANK"]}}}],
+}
+
+
+def _rpc(url, token, method, params, timeout=600):
+    """One POST /rpc to the oracle HTTP front (raw urllib; no oracle deps)."""
+    import json
+    import urllib.request
+
+    body = json.dumps({"id": 1, "method": method, "params": params}).encode()
+    req = urllib.request.Request(
+        url.rstrip("/") + "/rpc", data=body,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        resp = json.loads(r.read().decode())
+    if not resp.get("ok"):
+        raise RuntimeError(f"{method} -> {resp.get('error')}")
+    return resp["result"]
+
+
+def _inline_smoke(url, token, tiers, full_press):
+    """Drive info/get_orders/policy/value (+message) over the tunnel; print a report."""
+    import json
+
+    game = json.dumps(_OPENING_GAME)
+    info = _rpc(url, token, "info", {})
+    print("[smoke][info]", json.dumps(info))
+    for tier in tiers:
+        orders = _rpc(url, token, "get_orders", {"game_json": game, "power": "FRANCE", "tier": tier})
+        print(f"[smoke][get_orders][{tier}] FRANCE -> {orders['orders']}")
+        try:
+            pol = _rpc(url, token, "policy", {"game_json": game, "power": "FRANCE", "tier": tier, "top_k": 3})
+            print(f"[smoke][policy][{tier}] top3 -> {[(p['orders'], round(p['prob'],3)) for p in pol['policy']]}")
+        except Exception as e:
+            print(f"[smoke][policy][{tier}] skipped: {e}")
+        val = _rpc(url, token, "value", {"game_json": game, "tier": tier})
+        print(f"[smoke][value][{tier}] -> {json.dumps({k: round(v,4) for k,v in val['value'].items()})}")
+        if full_press:
+            msg = _rpc(url, token, "generate_message",
+                       {"game_json": game, "power": "FRANCE", "recipient": "ENGLAND", "tier": tier})
+            print(f"[smoke][message][{tier}] FRANCE->{msg.get('recipient')}: {msg.get('body')!r}")
+    print("[smoke] ✅ PASSED")
+
+
 @app.local_entrypoint()
 def serve(tiers: str = "searchbot", port: int = 8000, gpu: str = "A10G",
-          timeout: int = 3600, token: str = ""):
+          timeout: int = 3600, token: str = "", smoke: bool = False,
+          full_press: bool = False):
     """Serve the agentic-diplomacy oracle HTTP front over a Modal tunnel.
 
     tiers:   comma-separated subset of TIER_PRESETS to load into one process
              (no-press tiers are light and co-resident; use a dedicated A100
              `serve` for `cicero`, e.g. --tiers cicero --gpu A100-80GB).
+    smoke:   if set, run an inline info/get_orders/policy/value smoke against the
+             tunnel (add --full-press to also exercise generate_message) and exit.
     Prints the tunnel URL + bearer token; wire them into the MCP registry as an
-    `http` tier. The box stays up for `timeout` seconds (warm GPU); Ctrl-C ends it.
+    `http` tier. Without --smoke the box stays warm until `timeout`.
     """
+    import threading
     import time
+    import urllib.request
 
     tier_list = [t.strip() for t in tiers.split(",") if t.strip()]
     unknown = [t for t in tier_list if t not in TIER_PRESETS]
@@ -481,16 +555,39 @@ def serve(tiers: str = "searchbot", port: int = 8000, gpu: str = "A10G",
     )
     try:
         proc = sb.exec("bash", "-lc", _oracle_cmd(tier_list, port, token))
+        # Stream server logs in the background so a crash's traceback is visible.
+        for s in (proc.stdout, proc.stderr):
+            threading.Thread(target=lambda st: [print(line, end="", flush=True) for line in st],
+                             args=(s,), daemon=True).start()
         url = sb.tunnels()[port].url
         print("=" * 72)
         print(f"oracle serving tiers={tier_list} gpu={gpu}")
         print(f"  URL:   {url}")
         print(f"  TOKEN: {token}")
-        print("  MCP registry tier spec:")
-        print(f'    {{"transport": "http", "url": "{url}", "token_env": "ORACLE_TOKEN"}}')
-        print("  (export ORACLE_TOKEN=<token> where the MCP server runs)")
+        print('  MCP registry: {"transport":"http","url":"%s","token_env":"ORACLE_TOKEN"}' % url)
         print("=" * 72, flush=True)
-        # Stream the server's logs until the sandbox times out or is interrupted.
-        _stream(proc)
+
+        # Supervise: wait for /health, optionally smoke, then keep warm. Polling
+        # /health from here (the local entrypoint) also keeps the sandbox alive
+        # without depending on the server process to block the entrypoint.
+        deadline = time.time() + timeout
+        healthy = False
+        while time.time() < deadline:
+            rc = proc.poll()
+            if rc is not None:
+                print(f"!! oracle process exited rc={rc} (see logs above)", flush=True)
+                return
+            if not healthy:
+                try:
+                    with urllib.request.urlopen(url.rstrip("/") + "/health", timeout=10) as r:
+                        healthy = r.status == 200
+                except Exception:
+                    healthy = False
+                if healthy:
+                    print("[serve] /health OK — oracle ready", flush=True)
+                    if smoke:
+                        _inline_smoke(url, token, tier_list, full_press)
+                        return
+            time.sleep(5)
     finally:
         sb.terminate()
