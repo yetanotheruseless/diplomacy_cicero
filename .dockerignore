@@ -43,3 +43,8 @@ models/
 *.o
 *.a
 *.dylib
+# Encrypted model weights (~99GB) - never needed in image
+models_encrypted/
+dipcc_pkg/
+*.bak
+.cicero_model_stage/

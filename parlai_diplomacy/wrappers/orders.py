@@ -1018,6 +1018,21 @@ class ParlAIAllOrderIndependentRolloutWrapper(BaseOrderWrapper):
         ]
         return orders
 
+    def produce_action(self, game: pydipcc.Game, power: Power) -> Action:
+        """
+        Produce the current-phase action for a single power.
+
+        The base BaseOrderWrapper.produce_action relies on format_output_seq_action,
+        which this rollout wrapper does not implement (it predicts a multi-phase
+        RolloutAction). Delegate to produce_many_order_for_target_power, which
+        already extracts the current-phase Action, and take the top prediction.
+        This lets parlai_full_press_agent / ParlaiOrderHandler resolve orders.
+        """
+        results = self.produce_many_order_for_target_power(
+            game, view_of_power=power, target_power=power, num_preds=1
+        )
+        return results[0][0] if results else tuple()
+
     def format_output_seq(self, *args, **kwargs) -> RolloutAction:
         return self.formatter.orders_unflattener.unflatten_rollout_action(
             args[0], current_phase=kwargs.get("current_phase")
