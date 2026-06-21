@@ -1107,12 +1107,12 @@ def _forward_all_powers(
 
         NPOWERS = len(POWERS)
         enc_repeat = enc.repeat_interleave(NPOWERS, dim=0)
-        loc_idxs = loc_idxs.view(-1, loc_idxs.shape[2])
-        cand_idxs = cand_idxs.view(-1, *cand_idxs.shape[2:])
+        loc_idxs = loc_idxs.reshape(-1, loc_idxs.shape[2])
+        cand_idxs = cand_idxs.reshape(-1, *cand_idxs.shape[2:])
         temperature = repeat_interleave_if_tensor(temperature, NPOWERS, dim=0)
         top_p = repeat_interleave_if_tensor(top_p, NPOWERS, dim=0)
         teacher_force_orders = (
-            teacher_force_orders.view(-1, *teacher_force_orders.shape[2:])
+            teacher_force_orders.reshape(-1, *teacher_force_orders.shape[2:])
             if teacher_force_orders is not None
             else None
         )
@@ -1130,7 +1130,7 @@ def _forward_all_powers(
             assert len(power.shape) == 3, power.shape
             assert power.shape[1] == NPOWERS, power.shape
             assert power.shape[2] == N_SCS, power.shape
-            power = power.view(-1, N_SCS)
+            power = power.reshape(-1, N_SCS)
 
     with timings("policy_decoder"):
         # [B, 17, 469] -> [B, 17].
