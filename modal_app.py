@@ -450,8 +450,20 @@ def _serving_image():
     return img
 
 
-def _oracle_cmd(tiers, port, token):
-    """Build the `oracle_server.py --transport http` argv for the given tiers."""
+def _rollout_key(tier):
+    """The heyhi n_rollouts override key for a tier's search budget (None = no search)."""
+    if tier in ("diplodocus_high", "diplodocus_low", "cicero"):
+        return "bqre1p.base_searchbot_cfg.n_rollouts"
+    if tier == "searchbot":
+        return "searchbot.n_rollouts"
+    return None  # imitation / base_strategy_model: no search
+
+
+def _oracle_cmd(tiers, port, token, rollouts=0):
+    """Build the `oracle_server.py --transport http` argv for the given tiers.
+
+    rollouts>0 caps each search tier's n_rollouts (cheap smokes); 0 = config default.
+    """
     args = [
         "python", "-u", "/opt/oracle/oracle_server.py",
         "--transport", "http", "--host", "0.0.0.0", "--port", str(port),
@@ -464,6 +476,8 @@ def _oracle_cmd(tiers, port, token):
             args += ["--value-model", f"{tier}={preset['value']}"]
         for ov in preset.get("overrides", []):
             args += ["--override", f"{tier}:{ov}"]
+        if rollouts and _rollout_key(tier):
+            args += ["--override", f"{tier}:{_rollout_key(tier)}={rollouts}"]
     # Token via env so it never lands in `ps`/logs. The extra pip deps are the
     # same ParlAI runtime closure the main/game entrypoints install — required for
     # full-press (dialogue) tiers, harmless for no-press.
@@ -538,7 +552,7 @@ def _inline_smoke(url, token, tiers, full_press):
 @app.local_entrypoint()
 def serve(tiers: str = "searchbot", port: int = 8000, gpu: str = "A10G",
           timeout: int = 3600, token: str = "", smoke: bool = False,
-          full_press: bool = False):
+          full_press: bool = False, rollouts: int = 0):
     """Serve the agentic-diplomacy oracle HTTP front over a Modal tunnel.
 
     tiers:   comma-separated subset of TIER_PRESETS to load into one process
@@ -564,7 +578,7 @@ def serve(tiers: str = "searchbot", port: int = 8000, gpu: str = "A10G",
         encrypted_ports=[port], timeout=timeout, cpu=8.0, memory=49152,
     )
     try:
-        proc = sb.exec("bash", "-lc", _oracle_cmd(tier_list, port, token))
+        proc = sb.exec("bash", "-lc", _oracle_cmd(tier_list, port, token, rollouts))
         # Stream server logs in the background so a crash's traceback is visible.
         for s in (proc.stdout, proc.stderr):
             threading.Thread(target=lambda st: [print(line, end="", flush=True) for line in st],
