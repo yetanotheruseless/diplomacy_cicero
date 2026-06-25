@@ -32,8 +32,16 @@ reproducible evidence, **all of**:
 The three "famous walls" all turned out to be **surmountable**: protobuf 3.19.1
 EXACT (broken — works on 7.x after a codegen rewrite), the dipcc C++ build (built
 on arm64 after 4 small portability fixes), and ParlAI (installs + imports on
-3.11). The remaining real blockers are **narrow and well-understood** (checkpoint
-loading semantics, and the CUDA-only paths that can't validate on this box).
+3.11).
+
+> **UPDATE — Modal validation (see `MODAL_VALIDATION.md`).** The blockers below
+> marked "needs the container/Modal env to validate" have since been **run on
+> real Modal Linux x86_64 + CUDA (A10G)** and all PASS: **B5** (pydipcc Linux
+> build + adjudication), **B1** (`torch.load(weights_only=False)` → 4/4 real
+> checkpoints into the modern `BaseStrategyModelV2` `nn.Module`), **B2**
+> (base_strategy_model fp16 GPU inference), **B3** (ParlAI/BART dialogue forward
+> pass on CUDA). With `modal run` logs as evidence, full modernization is **not**
+> blocked by a C++, protobuf, or ParlAI wall — see `modal_modern.py`.
 
 ---
 
@@ -182,34 +190,45 @@ on the modern stack.
 
 ## 3. BLOCKERS (specific error + root cause + effort)
 
-### B1. Real model-weight loading — `torch.load` `weights_only` (MEDIUM, not validated locally)
-- **Symptom (expected):** in torch ≥2.6, `torch.load` defaults to
-  `weights_only=True`; Cicero checkpoints are **full pickled objects**, so loading
-  real weights will raise `UnpicklingError`/`weights_only` errors.
-- **Sites:** ~13 `torch.load(...)` calls (e.g.
-  `models/base_strategy_model/load_model.py:156`, `env.py:394`,
-  `selfplay/ckpt_syncer.py`, `heyhi/run.py:181`).
-- **Fix/effort:** add `weights_only=False` (trusted local checkpoints) or
-  `torch.serialization.add_safe_globals([...])`. **Low effort**, but **not
-  validated locally** — the actual Cicero weights are large gated downloads not
-  present in this checkout. Needs the model files to confirm the *deserialized
-  state_dict* still loads into the modern `nn.Module` definitions.
+> B1, B2, B3, B5 below were "needs container/Modal" at arm64-time and have since
+> been **CLEARED on Modal Linux x86_64 + CUDA** — see `MODAL_VALIDATION.md` /
+> `modal_modern.py`. Only B4 (cosmetic) and the out-of-scope distributed C++
+> remain.
 
-### B2. CUDA-only paths (BLOCKED on this box — needs container/Modal)
-- AMP training (`train_sl.py`), `torch.distributed.init_process_group("nccl", …)`
-  (`train_sl.py:848`, `selfplay/exploit.py`), and any GPU inference can't run on
-  macOS/arm64 without CUDA. The code *imports* fine; **execution** needs
-  x86_64+CUDA. The legacy Docker/Modal images target exactly that — the dipcc
-  CMake fixes here are arm64-specific and would need the analogous Linux build
-  (which is the legacy build's home turf, so lower risk).
+### B1. Real model-weight loading — `torch.load` `weights_only` — ✅ CLEARED (Modal CPU)
+- **Symptom:** in torch ≥2.6, `torch.load` defaults to `weights_only=True`;
+  Cicero checkpoints are **full pickled objects** (they embed the `args`
+  `TrainTask` config alongside the `model` weights), so this raised
+  `UnpicklingError`.
+- **Fix (applied):** `load_model.py:156` → `torch.load(..., weights_only=False)`
+  (trusted local checkpoints). Other `torch.load` sites (`env.py`,
+  `selfplay/ckpt_syncer.py`, `heyhi/run.py`) take the same one-line fix when
+  exercised.
+- **Validated:** `modal run modal_modern.py::load_weights` → **4/4 real
+  checkpoints** (`no_press_human_imitation_policy`, `rl_search_orders`,
+  `rl_value_function`, `diplodocus_high_rl_policy`) load into the modern
+  `BaseStrategyModelV2` `nn.Module` (8.1M / 3.5M params) from the `cicero-models`
+  Volume.
 
-### B3. ParlAI *runtime* (model inference) — partially validated
-- ParlAI **imports** on 3.11 (§2.5), but I did not run a full dialogue-generation
-  forward pass (needs the BART dialogue weights + BPE dicts, gated downloads).
-  Risk is moderate: ParlAI 1.5.1 predates torch 2.x, so a forward pass may hit
-  deprecated torch ops at call time (not import time). **Effort to fully clear:
-  unknown until weights are available**; the import-clean result strongly
-  suggests "patch a handful of call-time torch APIs" rather than "rewrite".
+### B2. CUDA-only inference — ✅ CLEARED (Modal A10G)
+- GPU `base_strategy_model` inference (incl. the **fp16** `half_precision=True`
+  path that can't run on CPU) executes on the modern CUDA wheel.
+- **Validated:** `modal run modal_modern.py::gpu_checks` →
+  `torch 2.6.0+cu124 cuda 12.4 dev NVIDIA A10`; `forward_policy(...)` returns
+  valid orders for all powers.
+- **Still container-only (by nature):** AMP *training* and
+  `torch.distributed.init_process_group("nccl", …)` (`train_sl.py:848`,
+  `selfplay/exploit.py`) are multi-GPU training paths — not exercised (inference
+  is the agent use case), but they import fine and the AMP API is already
+  modernized (§2.4).
+
+### B3. ParlAI *runtime* (dialogue forward pass) — ✅ CLEARED (Modal A10G)
+- ParlAI 1.5.1 (pinned commit) loads a real Cicero dialogue checkpoint
+  (`cicero_imitation_bilateral_orders_prefix`) on CUDA and runs `agent.act()`
+  generation. Only ordinary pip deps were missing (`regex`, `sentencepiece`,
+  `ftfy`, `emoji`) — **no source patches** to ParlAI.
+- **Validated:** `modal run modal_modern.py::gpu_checks` → B3 PASS, generated
+  output `A BEL  A MUN`.
 
 ### B4. Cosmetic test deltas (NOT a blocker)
 - 2 `heyhi/tests/test_conf.py` failures from protobuf's `Message.__str__` float
@@ -217,13 +236,15 @@ on the modern stack.
   expected strings or route `to_str_with_defaults` through
   `text_format.MessageToString` (which still emits `-1.0`).
 
-### B5. dipcc on Linux/x86_64 + the `selfplay` C++ (needs container)
-- The `pydipcc` arm64 build is proven here; the **Linux** build with the 4 fixes
-  is untested locally but should be *easier* (it's the original target). The
-  separate `fairdiplomacy/selfplay/cc` (postman/grpc) C++ was **not** attempted —
-  it depends on the `fairinternal/postman` + grpc submodules (the `.gitmodules`
-  point at `grpc v1.20.x` and an empty `pybind11` submodule). That is a larger
-  native build and is only needed for distributed RL self-play, **not** for
+### B5. dipcc on Linux/x86_64 — ✅ CLEARED (Modal CPU); `selfplay` C++ out of scope
+- **Validated:** `modal run modal_modern.py::build_and_adjudicate` builds
+  `pydipcc.cpython-311-x86_64-linux-gnu.so` against torch 2.6 and runs correct
+  multi-turn adjudication. The `int64_t` change is a no-op on Linux
+  (`long == int64_t`) and compiled clean — no Linux-specific regressions.
+- **Out of scope:** the separate `fairdiplomacy/selfplay/cc` (postman/grpc) C++
+  was not attempted — it needs the `fairinternal/postman` + grpc submodules
+  (`.gitmodules` point at `grpc v1.20.x` and an empty `pybind11` submodule). It's
+  a larger native build only needed for **distributed RL self-play**, not for
   agent play/inference.
 
 ---
@@ -238,30 +259,32 @@ on the modern stack.
 3. **Keep the pure-Python `nest` shim** (§2.3) — it removes a native dependency
    for the whole agent path; only the distributed self-play data loaders use the
    parts that touch it, and those still work via the shim.
-4. **Resolve B1** by adding `weights_only=False` to the `torch.load` sites and
-   then load one real `base_strategy_model` checkpoint to confirm the modern
-   `nn.Module` definitions still accept the state_dict (the model code already
-   imports clean under torch 2.12).
-5. **Validate B2/B3/B5 in the container/Modal env** (x86_64+CUDA): the legacy
-   Docker images already rebuild dipcc for x86_64; fold the §2.2 fixes in, then
-   run a GPU `base_strategy_model` inference and a single ParlAI dialogue forward
-   pass to close the runtime gap.
+4. **B1 done** — `weights_only=False` applied in `load_model.py`; 4/4 real
+   checkpoints load into the modern `BaseStrategyModelV2` `nn.Module` on Modal.
+5. **B2/B3/B5 done on Modal** — `modal_modern.py` builds the modern stack on
+   Linux x86_64, and the GPU run validates base_strategy_model fp16 inference +
+   a ParlAI/BART dialogue forward pass (see `MODAL_VALIDATION.md`).
 
-**Honest verdict:** **Full modernization is feasible, not blocked by a C++ or
-ParlAI wall.** The Python/protobuf/C++ *import-and-build* layer is done and
-proven on a modern stack (Python 3.11 + torch 2.12 + protobuf 7.35). What remains
-is **runtime validation with real weights** (B1/B3) and **the CUDA/Linux paths**
-(B2/B5) that simply cannot execute on this CPU/arm64 box — those are
-"needs-the-container" items, not architectural dead-ends.
+**Honest verdict:** **Full modernization is feasible, not blocked by a C++,
+protobuf, or ParlAI wall.** The Python/protobuf/C++ build layer is done and proven
+on a modern stack on **both** macOS/arm64 (Python 3.11 + torch 2.12 + protobuf
+7.35) **and** Modal Linux x86_64 + CUDA (Python 3.11 + torch 2.6 + protobuf 7.35).
+Real production weights load into the modern model code, GPU inference runs, and
+ParlAI generates dialogue. The only items not closed are **cosmetic** (B4: 2
+float-formatting test strings) and **out of scope** (distributed RL self-play C++,
+which needs the unreleased postman/grpc submodules and isn't part of agent
+play/inference).
 
 ---
 
 ## 5. Commits on this branch
 
 ```
+modal: validate modern stack on Linux x86_64 + CUDA; fix torch.load weights_only
 nest: pure-Python drop-in for FAIR's nest pybind11 extension
 py3/torch/numpy: nested frozen configs + modern numpy & AMP fixes
 dipcc: build pydipcc on macOS/arm64 against modern torch + glog
 protobuf: modernize patch_protos.py for protobuf >= 4 (upb codegen)
 ```
-plus this report + `scripts/modernize_setup.sh` (reproducible setup/evidence).
+plus this report, `MODAL_VALIDATION.md`, `modal_modern.py` (Linux/CUDA harness),
+and `scripts/modernize_setup.sh` (reproducible local setup/evidence).
