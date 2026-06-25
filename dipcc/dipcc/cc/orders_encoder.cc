@@ -337,7 +337,7 @@ void OrdersEncoder::encode_valid_orders(Power power, GameState &state,
 // Returns a 3d vector of string (batch, power, orders)
 vector<vector<vector<string>>>
 OrdersDecoder::decode_order_idxs(torch::Tensor *order_idxs) const {
-  auto accessor = order_idxs->accessor<long, 3>();
+  auto accessor = order_idxs->accessor<int64_t, 3>();
   long batch_size = accessor.size(0);
   long max_seq_len = accessor.size(2);
 
@@ -373,7 +373,7 @@ vector<vector<vector<string>>> OrdersDecoder::decode_order_idxs_all_powers(
     torch::Tensor *x_power, int batch_repeat_interleave) const {
 
   auto accessor_in_adj = x_in_adj_phase->accessor<float, 1>();
-  auto accessor_power = x_power->accessor<long, 3>();
+  auto accessor_power = x_power->accessor<int64_t, 3>();
 
   auto order_strings = decode_order_idxs(order_idxs);
   // return order_strings;

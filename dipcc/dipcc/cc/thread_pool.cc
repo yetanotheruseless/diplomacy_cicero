@@ -89,7 +89,10 @@ torch::Tensor ThreadPool::encode_orders_tolerant(const Game &game,
                                                  int input_version) {
   auto tensor = torch::empty({2, 100}, torch::kLong);
   const OrdersEncoder &orders_encoder_ = get_orders_encoder(input_version);
-  auto tensor_ptr = tensor.data_ptr<long>();
+  // macOS/arm64: `long` is not an exported data_ptr<> instantiation in
+  // libtorch (only `long long`/int64_t is). They are the same 64-bit type,
+  // so request int64_t and reinterpret to long* to match the encoder API.
+  auto tensor_ptr = reinterpret_cast<long *>(tensor.data_ptr<int64_t>());
   std::vector<Order> orders_parsed;
   std::vector<const GameState *> state_for_each_order;
   for (const auto &order_str : orders) {
@@ -105,7 +108,10 @@ torch::Tensor ThreadPool::encode_orders_strict(vector<std::string> &orders,
                                                int input_version) {
   auto tensor = torch::empty({2, 100}, torch::kLong);
   const OrdersEncoder &orders_encoder_ = get_orders_encoder(input_version);
-  auto tensor_ptr = tensor.data_ptr<long>();
+  // macOS/arm64: `long` is not an exported data_ptr<> instantiation in
+  // libtorch (only `long long`/int64_t is). They are the same 64-bit type,
+  // so request int64_t and reinterpret to long* to match the encoder API.
+  auto tensor_ptr = reinterpret_cast<long *>(tensor.data_ptr<int64_t>());
   std::vector<Order> orders_parsed;
   for (const auto &order_str : orders)
     orders_parsed.emplace_back(order_str);
@@ -131,7 +137,7 @@ TensorDict ThreadPool::encode_inputs_state_only_multi(vector<Game *> &games,
         EncodingArrayPointers{
             fields["x_board_state"].index({i}).data_ptr<float>(),
             fields["x_prev_state"].index({i}).data_ptr<float>(),
-            fields["x_prev_orders"].index({i}).data_ptr<long>(),
+            reinterpret_cast<long *>(fields["x_prev_orders"].index({i}).data_ptr<int64_t>()),
             fields["x_season"].index({i}).data_ptr<float>(),
             fields["x_year_encoded"].index({i}).data_ptr<float>(),
             fields["x_in_adj_phase"].index({i}).data_ptr<float>(),
@@ -163,7 +169,7 @@ TensorDict ThreadPool::encode_inputs_all_powers_multi(vector<Game *> &games,
         EncodingArrayPointers{
             fields["x_board_state"].index({i}).data_ptr<float>(),
             fields["x_prev_state"].index({i}).data_ptr<float>(),
-            fields["x_prev_orders"].index({i}).data_ptr<long>(),
+            reinterpret_cast<long *>(fields["x_prev_orders"].index({i}).data_ptr<int64_t>()),
             fields["x_season"].index({i}).data_ptr<float>(),
             fields["x_year_encoded"].index({i}).data_ptr<float>(),
             fields["x_in_adj_phase"].index({i}).data_ptr<float>(),
@@ -194,7 +200,7 @@ TensorDict ThreadPool::encode_inputs_multi(vector<Game *> &games,
         EncodingArrayPointers{
             fields["x_board_state"].index({i}).data_ptr<float>(),
             fields["x_prev_state"].index({i}).data_ptr<float>(),
-            fields["x_prev_orders"].index({i}).data_ptr<long>(),
+            reinterpret_cast<long *>(fields["x_prev_orders"].index({i}).data_ptr<int64_t>()),
             fields["x_season"].index({i}).data_ptr<float>(),
             fields["x_year_encoded"].index({i}).data_ptr<float>(),
             fields["x_in_adj_phase"].index({i}).data_ptr<float>(),

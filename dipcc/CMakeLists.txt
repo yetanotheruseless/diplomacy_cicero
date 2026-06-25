@@ -18,6 +18,27 @@ include_directories(${PYTHON_INCLUDE_DIRS})
 include_directories(${pybind11_INCLUDE_DIR})
 link_directories($ENV{CONDA_PREFIX}/lib/)
 
+# glog/gflags: on the legacy conda toolchain these are under $CONDA_PREFIX and
+# picked up implicitly. On Homebrew (macOS/arm64) they live under their own
+# prefixes and must be added explicitly. Look them up portably and fall back to
+# common Homebrew locations so the include path (glog/logging.h) resolves.
+find_package(glog QUIET)
+find_package(gflags QUIET)
+foreach(_brew_pkg glog gflags)
+  foreach(_brew_prefix /opt/homebrew/opt /usr/local/opt)
+    if(EXISTS "${_brew_prefix}/${_brew_pkg}/include")
+      include_directories("${_brew_prefix}/${_brew_pkg}/include")
+      link_directories("${_brew_prefix}/${_brew_pkg}/lib")
+    endif()
+  endforeach()
+endforeach()
+# Modern glog (>= 0.6) requires GLOG_USE_GLOG_EXPORT so that <glog/logging.h>
+# pulls in glog/export.h (which defines GLOG_EXPORT). The legacy conda glog
+# (0.4/0.5) did not need this. Define it unconditionally; it is a no-op on old
+# glog. Also suppress the abbreviated severities (LOG, INFO...) clash guard
+# defensively.
+add_definitions(-DGLOG_USE_GLOG_EXPORT)
+
 # Compiler flags
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -pg")
@@ -37,7 +58,12 @@ list(APPEND CMAKE_PREFIX_PATH ${TORCH_PATH})
 # set cuda arch list so that the built binary can be run on both pascal and volta
 set(TORCH_CUDA_ARCH_LIST "6.0;7.0")
 find_package(Torch REQUIRED)
-set(TORCH_PYTHON_LIBRARIES "${TORCH_PATH}/lib/libtorch_python.so")
+# libtorch_python is a .so on Linux but a .dylib on macOS. Resolve portably.
+if(APPLE)
+  set(TORCH_PYTHON_LIBRARIES "${TORCH_PATH}/lib/libtorch_python.dylib")
+else()
+  set(TORCH_PYTHON_LIBRARIES "${TORCH_PATH}/lib/libtorch_python.so")
+endif()
 
 # Compile dipcc
 file(GLOB SOURCES "dipcc/cc/*.cc")
