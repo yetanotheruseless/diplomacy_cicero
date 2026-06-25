@@ -608,7 +608,8 @@ def _main_subproc(
 
     scaler = None
     if args.auto_mixed_precision:
-        scaler = torch.cuda.amp.grad_scaler.GradScaler()
+        # torch 2.x unified AMP API (the old torch.cuda.amp.* paths are deprecated).
+        scaler = torch.amp.GradScaler("cuda")
 
     # load best losses to not immediately overwrite best checkpoints
     best_loss = checkpoint.get("best_loss") if checkpoint else None
@@ -649,7 +650,7 @@ def _main_subproc(
             optim.zero_grad()
 
             torch_context = (
-                torch.cuda.amp.autocast_mode.autocast()
+                torch.amp.autocast("cuda")
                 if args.auto_mixed_precision
                 else nullcontext()
             )

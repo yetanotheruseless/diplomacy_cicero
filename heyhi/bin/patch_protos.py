@@ -391,6 +391,20 @@ def _heyhi_patch_runtime(globals_dict, file_descriptor, package_prefix):
         # of those nested frozen configs is not used by Cicero.
         globals_dict.setdefault(frozen_global_name, frozen_class)
 
+    # Wire nested Frozen classes as attributes of their parent Frozen class, so
+    # that e.g. cfgs.TrainTask.TransformerDecoder resolves (mirroring how the
+    # raw proto class exposes TrainTask.TransformerDecoder). The legacy *_cfgs.py
+    # got this implicitly because nested proto classes were attributes of the
+    # already-patched parent proto class.
+    for descriptor in descriptors:
+        containing = descriptor.containing_type
+        if containing is None:
+            continue
+        parent_frozen = frozen_sym_bd.get(containing.full_name)
+        child_frozen = frozen_sym_bd.get(descriptor.full_name)
+        if parent_frozen is not None and child_frozen is not None:
+            setattr(parent_frozen, descriptor.name, child_frozen)
+
     # Then inject the runtime methods onto each proto message class.
     for descriptor in descriptors:
         proto_class = sym_db.GetSymbol(descriptor.full_name)
