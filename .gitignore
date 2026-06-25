@@ -42,3 +42,4 @@ dipcc/detect_cuda_version.cc
 node_modules/
 
 **/.claude/settings.local.json
+.venv-modern/

@@ -6,20 +6,41 @@
 #
 """Patches generated proto messages to add extra fields.
 
-Generated *_pb2.py files look like this:
+MODERNIZED FOR protobuf >= 4 (upb / new ``_builder`` codegen).
 
-    from google.protobuf import reflection as _reflection
-    ...
-    ActionRecallTask = _reflection.GeneratedProtocolMessageType('ActionRecallTask', (_message.Message,), dict(
-    DESCRIPTOR = _ACTIONRECALLTASK,
-    __module__ = 'conf.conf_pb2'
-    # @@protoc_insertion_point(class_scope:fairdiplomacy.ActionRecallTask)
+Legacy protobuf (<= 3.19) generated a ``*_pb2.py`` that constructed each message
+class with an explicit, per-class call::
+
+    Launcher = _reflection.GeneratedProtocolMessageType('Launcher', (_message.Message,), dict(
+        DESCRIPTOR = _LAUNCHER,
+        __module__ = 'conf.conf_pb2'
+        # @@protoc_insertion_point(class_scope:fairdiplomacy.Launcher)
     ))
 
-_reflection.GeneratedProtocolMessageType is esstentially a type() function
-that construcs a new class. We replace this function with
-magicaly_wrapped_proto_builder(). The new builder alters the dics with new
-fields from extra_fields() function.
+The old patcher monkeypatched ``_reflection.GeneratedProtocolMessageType`` and
+text-scraped the ``class_scope:`` insertion-point comments to enumerate the
+messages.  Modern protoc (>= 3.20) instead emits a single serialized
+``FileDescriptorProto`` and builds every class in one shot via::
+
+    _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'conf.conf_pb2', _globals)
+
+There are no per-class ``GeneratedProtocolMessageType`` calls and no
+``class_scope:`` markers anymore, so the legacy approach silently produced an
+empty ``*_cfgs.py``.
+
+This modern patcher keeps the *runtime* machinery (``_FrozenConf``,
+``_extra_fields``, ``FROZEN_SYM_BD``) byte-for-byte identical to the original so
+that the rest of the codebase (``heyhi/conf.py`` etc.) is unchanged.  What it
+changes is *how* the messages are discovered and patched:
+
+  * Discovery: walk the file's ``DESCRIPTOR`` recursively (including nested
+    messages) instead of scraping text.
+  * Injection: after the ``_builder`` call has built all the classes, patch the
+    extra methods (``to_frozen``, ``to_dict`` ...) directly onto each message
+    class and register the corresponding ``Frozen*`` class in ``FROZEN_SYM_BD``.
+
+This works because upb-backed message classes (``google._upb._message`` /
+``MessageMeta``) still allow setting plain Python methods on the class object.
 """
 
 from collections import defaultdict
@@ -29,10 +50,12 @@ try:
     from google.protobuf import message as _message
 except ImportError:
     print("Warning: google.protobuf not found, trying to continue without it")
+
     # Create a dummy _message for now so the script can continue
     class DummyMessage:
         class Message:
             pass
+
     _message = DummyMessage()
 
 import abc
@@ -44,6 +67,18 @@ import re
 TAG = "## PATCHED WITH HEYHI"
 
 CONF_INCLUDE_PREFIX = "conf."
+
+
+def _descriptor_is_repeated(field):
+    """Cross-version check for whether a proto field is repeated.
+
+    protobuf >= 5 (upb) dropped the per-instance ``label`` attribute in favor of
+    ``is_repeated``; older protobuf only has ``label``.
+    """
+    is_repeated = getattr(field, "is_repeated", None)
+    if is_repeated is not None:
+        return is_repeated
+    return field.label == field.LABEL_REPEATED
 
 
 class _FrozenConf:
@@ -135,6 +170,14 @@ def _extra_fields(msg_name, descriptor):
     Scalar = Union[None, str, float, int, bool]
     NestedDictList = Union[Dict[str, "NestedDictList"], List["NestedDictList"], Scalar]
 
+    def _is_repeated(field):
+        # protobuf >= 5 (upb) dropped the per-instance ``label`` attribute in
+        # favor of ``is_repeated``; older protobuf only has ``label``.
+        is_repeated = getattr(field, "is_repeated", None)
+        if is_repeated is not None:
+            return is_repeated
+        return field.label == field.LABEL_REPEATED
+
     name2field = dict((f.name, f) for f in descriptor.fields)
 
     # Mapping from a key from oneof's type to oneof name.
@@ -177,7 +220,7 @@ def _extra_fields(msg_name, descriptor):
 
             if isinstance(value, _message.Message):
                 value = maybe_to_dict(value)
-            elif field.label == field.LABEL_REPEATED:
+            elif _is_repeated(field):
                 if type(value).__name__.split(".")[-1] == "ScalarMapContainer":
                     value = {x: maybe_to_dict(value[x]) for x in value}
                 else:
@@ -241,12 +284,15 @@ def _extra_fields(msg_name, descriptor):
                 chosen_oneof = self.WhichOneof(field_to_oneof_name[name])
                 if name != chosen_oneof:
                     continue
-            value = _message.Message.__getattribute__(self, name)
+            # protobuf >= 5 (upb) messages don't route field access through
+            # ``Message.__getattribute__``; plain ``getattr`` is correct and works
+            # on both the C++/upb and pure-python implementations.
+            value = getattr(self, name)
             if isinstance(value, _message.Message):
                 value = maybe_to_dict(value)
                 if not with_all and not value and name not in field_to_oneof_name:
                     continue
-            elif field.label == field.LABEL_REPEATED:
+            elif _is_repeated(field):
                 if type(value).__name__.split(".")[-1] == "ScalarMapContainer":
                     value = {x: maybe_to_dict(value[x]) for x in value}
                 else:
@@ -285,15 +331,101 @@ def _extra_fields(msg_name, descriptor):
     return funcs
 
 
-def _magicaly_wrapped_proto_builder(builder):
-    if builder.__name__ == "new_builder":
-        # No double patching.
-        return builder
+def _iter_message_descriptors(file_descriptor):
+    """Yield every message descriptor in the file, including nested ones.
 
-    def new_builder(name, bases, fields):
-        return builder(name, bases, dict(fields, **_extra_fields(name, fields["DESCRIPTOR"])))
+    Replaces the legacy text-scrape of ``class_scope:`` insertion points.
+    Returns descriptors top-down so containers are registered before nested
+    types (matching the order the legacy code relied on via ``reversed``).
+    """
 
-    return new_builder
+    def _walk(desc):
+        yield desc
+        for nested in desc.nested_types:
+            yield from _walk(nested)
+
+    for message in file_descriptor.message_types_by_name.values():
+        yield from _walk(message)
+
+
+def _heyhi_patch_runtime(globals_dict, file_descriptor, package_prefix):
+    """Apply heyhi's frozen-config patching at *import time*.
+
+    ``globals_dict`` is the importing module's ``globals()``; ``file_descriptor``
+    is its ``DESCRIPTOR``; ``package_prefix`` is the proto package (e.g.
+    ``"fairdiplomacy."``) used to compute the flat (un-namespaced) class names.
+
+    For each message in the file:
+      * resolve the already-built Python class (from ``globals_dict``);
+      * inject the extra runtime methods onto it;
+      * build and register a ``Frozen*`` class in ``FROZEN_SYM_BD``.
+    """
+    from google.protobuf import symbol_database as _symbol_database
+
+    sym_db = _symbol_database.Default()
+    frozen_sym_bd = globals_dict.setdefault("FROZEN_SYM_BD", {})
+    module_name = globals_dict.get("__name__")
+
+    descriptors = list(_iter_message_descriptors(file_descriptor))
+
+    # First register every Frozen class so to_frozen() can reference siblings
+    # (FROZEN_SYM_BD[full_name]) regardless of declaration order.
+    for descriptor in descriptors:
+        full_name = descriptor.full_name
+        if full_name.startswith(package_prefix):
+            short_name = full_name[len(package_prefix):]
+        else:
+            short_name = full_name
+        proto_class = sym_db.GetSymbol(full_name)
+        flat_name = short_name.split(".")[-1]
+        frozen_class = create_frozen_class(proto_class, flat_name)
+        frozen_sym_bd[full_name] = frozen_class
+        # Bind the Frozen class as a module global under "Frozen<Flat>" and make
+        # its __module__/__qualname__ point here so that pickle can locate it.
+        # (Legacy patch_protos emitted these as literal module-level statements.)
+        frozen_global_name = f"Frozen{flat_name}"
+        frozen_class.__module__ = module_name
+        frozen_class.__qualname__ = frozen_global_name
+        # Only the first message with a given flat name wins the global slot
+        # (nested messages can share simple names, e.g. "Transformer"); pickling
+        # of those nested frozen configs is not used by Cicero.
+        globals_dict.setdefault(frozen_global_name, frozen_class)
+
+    # Then inject the runtime methods onto each proto message class.
+    for descriptor in descriptors:
+        proto_class = sym_db.GetSymbol(descriptor.full_name)
+        if getattr(proto_class, "heyhi_patched", False):
+            continue
+        for attr_name, attr_value in _extra_fields(descriptor.name, descriptor).items():
+            setattr(proto_class, attr_name, attr_value)
+
+
+def _emit_runtime_block(file_descriptor, package_prefix):
+    """Return the source lines injected into a generated ``*_pb2.py`` file.
+
+    The block defines the frozen-config machinery and then calls
+    ``_heyhi_patch_runtime`` so that importing the module patches all messages.
+    """
+    lines = []
+    lines.append(f"{TAG} START")
+    lines.append("import abc")
+    lines.append("from collections import defaultdict as _defaultdict  # noqa: F401")
+    # The closures inside _extra_fields reference ``_message`` (the protobuf
+    # message module).  Modern generated files no longer import it under that
+    # name, so make it available here.
+    lines.append("from google.protobuf import message as _message  # noqa: F401")
+    lines.append("if 'FROZEN_SYM_BD' not in globals():")
+    lines.append("   globals()['FROZEN_SYM_BD'] = {}")
+    lines.append(inspect.getsource(_FrozenConf))
+    lines.append(inspect.getsource(create_frozen_class))
+    lines.append(inspect.getsource(_extra_fields))
+    lines.append(inspect.getsource(_iter_message_descriptors))
+    lines.append(inspect.getsource(_heyhi_patch_runtime))
+    lines.append(
+        f"_heyhi_patch_runtime(globals(), DESCRIPTOR, {package_prefix!r})"
+    )
+    lines.append(f"{TAG} end\n")
+    return lines
 
 
 def patch_pb2(pb2_path):
@@ -302,74 +434,52 @@ def patch_pb2(pb2_path):
     if TAG in content:
         return
 
-    old_full_classes = []
-    for line in content.split("\n"):
-        # Launcher = _reflection.GeneratedProtocolMessageType('Launcher', (_message.Message,), {
-        prefix = "# @@protoc_insertion_point(class_scope:"
-        if prefix in line:
-            old_full_classes.append(line[line.find(prefix) + len(prefix) :].strip(")").strip())
-
-    # Creating patched version of generated proto file. Will be saved in original files.
-    lines = []
-
-    # Patch includes to use "internal_*" files.
-    for line in content.split("\n"):
-        lines.append(line)
-        if "@@protoc_insertion_point(imports)" in line:
-            lines.append(f"{TAG} START")
-            lines.append("import abc")
-
-            lines.append(inspect.getsource(_extra_fields))
-            lines.append(inspect.getsource(_magicaly_wrapped_proto_builder))
-            lines.append("from google.protobuf import reflection as _reflection")
-            lines.append(
-                "_reflection.GeneratedProtocolMessageType = _magicaly_wrapped_proto_builder("
-                "_reflection.GeneratedProtocolMessageType)"
-            )
-            lines.append(f"{TAG} end\n")
-
-    def remove_package_name(full_object_path):
-        if full_object_path.startswith("fairdiplomacy."):
-            return klass.split(".", 1)[1]  # Stripping "fairdiplomacy."
-        return full_object_path
-
-    lines.append("if 'FROZEN_SYM_BD' not in globals():")
-    lines.append("   globals()['FROZEN_SYM_BD'] = {}")
-    lines.append(inspect.getsource(_FrozenConf))
-    lines.append(inspect.getsource(create_frozen_class))
-    for klass in reversed(old_full_classes):
-        short_klass = remove_package_name(klass)
-        lines.append(
-            f"FROZEN_SYM_BD['{klass}'] = create_frozen_class(_sym_db.GetSymbol('{klass}'), '{short_klass}')"
-        )
-        lines.append(f"Frozen{short_klass} = FROZEN_SYM_BD['{klass}']")
-
-    with open(pb2_path, "w") as stream:
-        stream.write("\n".join(lines))
-
     pb2_include_path: str = CONF_INCLUDE_PREFIX + pb2_path.name.rsplit(".", 1)[0]
     assert pb2_include_path.endswith("_pb2")
     cfgs_include_path = pb2_include_path[:-4] + "_cfgs"
 
-    # Creating a user facing set of classes.
-    lines = []
-    lines.append(f"{TAG} START")
-    lines.append(f"from {pb2_include_path} import *")
-    lines.append("# Create new classes and flat names for them.")
+    # Import the freshly generated (unpatched) module to introspect its
+    # descriptor.  This is how we discover the messages in the modern format.
+    pb2_module = importlib.import_module(pb2_include_path)
+    file_descriptor = pb2_module.DESCRIPTOR
+    package_prefix = file_descriptor.package + "." if file_descriptor.package else ""
 
-    for klass in reversed(old_full_classes):
-        short_klass = remove_package_name(klass)
-        if len(short_klass.split(".")) == 1:
-            lines.append(f"Proto_{short_klass} = {short_klass}")
-        lines.append(f"{short_klass} = FROZEN_SYM_BD['{klass}']")
-    lines.append(f"{TAG} end\n")
+    message_full_names = [d.full_name for d in _iter_message_descriptors(file_descriptor)]
+
+    # Append the runtime patching block to the generated _pb2.py.  We append at
+    # the very end so that DESCRIPTOR and all message classes already exist.
+    runtime_block = _emit_runtime_block(file_descriptor, package_prefix)
+    with open(pb2_path, "a") as stream:
+        stream.write("\n")
+        stream.write("\n".join(runtime_block))
+
+    def short_of(full_name):
+        if full_name.startswith(package_prefix):
+            return full_name[len(package_prefix):]
+        return full_name
+
+    # Creating a user facing set of classes in *_cfgs.py.  Every config class is
+    # exposed under its flat name pointing at the Frozen variant; the raw proto
+    # class is preserved as Proto_<Name> for top-level messages (mirrors legacy).
+    cfgs_lines = []
+    cfgs_lines.append(f"{TAG} START")
+    cfgs_lines.append(f"from {pb2_include_path} import *")
+    cfgs_lines.append(f"from {pb2_include_path} import FROZEN_SYM_BD")
+    cfgs_lines.append("# Create new classes and flat names for them.")
+    for full_name in reversed(message_full_names):
+        short_name = short_of(full_name)
+        flat_name = short_name.split(".")[-1]
+        if len(short_name.split(".")) == 1:
+            cfgs_lines.append(f"Proto_{flat_name} = {flat_name}")
+        cfgs_lines.append(f"{flat_name} = FROZEN_SYM_BD[{full_name!r}]")
+    cfgs_lines.append(f"{TAG} end\n")
 
     cfgs_path = str(pb2_path).replace("_pb2", "_cfgs")
     print("Generating", str(cfgs_path))
     with open(cfgs_path, "w") as stream:
-        stream.write("\n".join(lines))
+        stream.write("\n".join(cfgs_lines))
 
-    # Patch the pyi file too,if it exists
+    # Patch the pyi file too, if it exists
     pb2_pyi_path = pathlib.Path(str(pb2_path).replace(".py", ".pyi"))
     patch_pb2_pyi(pb2_pyi_path, pb2_include_path, cfgs_include_path)
 
@@ -479,7 +589,7 @@ def patch_pb2_pyi(pb2_pyi_path, pb2_include_path, cfgs_include_path):
                     fieldtype_to_use = fieldtype_to_use.replace("_pb2.", "_cfgs.")
 
                     # Handle default and repeated fields
-                    if field.label == field.LABEL_REPEATED:
+                    if _descriptor_is_repeated(field):
                         fieldtype_to_use = f"Sequence[{fieldtype_to_use}]"
                     elif not (
                         field.has_default_value
@@ -532,7 +642,7 @@ def patch_pb2_pyi(pb2_pyi_path, pb2_include_path, cfgs_include_path):
                     ):
                         fieldtype_to_use = f"Union[{fieldtype_to_use},Dict[str,Any]]"
                     # Handle repeated fields
-                    if field.label == field.LABEL_REPEATED:
+                    if _descriptor_is_repeated(field):
                         fieldtype_to_use = f"typing.Iterable[{fieldtype_to_use}]"
 
                     lines.append(line)
