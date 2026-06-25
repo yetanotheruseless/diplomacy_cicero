@@ -153,7 +153,10 @@ def load_base_strategy_model_model_and_args(
 
     # Loading model to gpu right away will load optimizer state we don't care about.
     logging.info(f"Loading base_strategy_model from {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    # torch >= 2.6 defaults torch.load to weights_only=True. Cicero checkpoints are
+    # full pickles (they embed the TrainTask config object alongside the weights),
+    # so weights_only=True raises UnpicklingError. These are trusted local files.
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 
     args = checkpoint["args"]
     if not isinstance(args, dict):
