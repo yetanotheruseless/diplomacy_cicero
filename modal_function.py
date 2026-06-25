@@ -211,11 +211,14 @@ class CiceroOracle:
         """Launch the py3.9 oracle HTTP server on localhost:<port> (warm the GPU).
 
         Runs under the 3.11 runtime; the subprocess is the 3.9 interpreter by
-        absolute path. We do NOT block here for readiness — ``@modal.web_server``'s
-        ``startup_timeout`` governs how long Modal waits for the port to accept
-        connections, and the oracle opens its socket *before* model weights finish
-        loading (stdlib ``ThreadingHTTPServer`` binds immediately), so the first
-        request simply waits on the per-request timeout while the lazy tier loads.
+        absolute path. We do NOT block here for readiness — Modal's readiness check
+        is a TCP connect to the port, governed by ``@modal.web_server``'s
+        ``startup_timeout``. IMPORTANT: ``oracle_server.py`` binds its socket only
+        AFTER building the backend and eager-loading value nets (it calls
+        ``serve_http`` last), so the port does not open until model loading is well
+        underway — ``startup_timeout`` must therefore cover the full model-load time
+        (minutes), which is why it defaults to 1800s here, not the web_server 5s
+        default. See DUAL_PYTHON_SERVING.md §5.
         """
         tiers = _tier_list()
         # A bearer token so the public URL isn't open. Read by clients from
@@ -227,10 +230,10 @@ class CiceroOracle:
             print(f"[enter] no ORACLE_TOKEN secret set; minted ephemeral token: {token}", flush=True)
 
         # ``_oracle_cmd`` returns a bash one-liner that `cd /app`, pip-installs the
-        # ParlAI runtime closure, and execs oracle_server.py. It begins with
-        # ``python ...`` — we MUST run that under the 3.9 interpreter, NOT the 3.11
-        # runtime. So force the legacy python: prepend its bin dir to PATH for the
-        # subprocess and (belt+braces) point the command's ``python`` at PY39.
+        # ParlAI runtime closure, and execs oracle_server.py. Its bare ``python``/
+        # ``pip`` tokens MUST resolve to the 3.9 interpreter, NOT the 3.11 runtime.
+        # We force that below by prepending the legacy python's bin dir to the
+        # subprocess PATH (overriding the 3.11-first PATH Modal's runtime uses).
         cmd = _oracle_cmd(tiers, DEFAULT_PORT, token, rollouts=int(os.environ.get("ORACLE_ROLLOUTS", "0")))
 
         # Run the whole thing under the 3.9 interpreter. The simplest robust way:
