@@ -408,7 +408,7 @@ class TestPatchedFunctions(unittest.TestCase):
         cfg = heyhi.conf.load_proto_message(root_cfg)
         EXPECTED_MSG = """
 test {
-  scalar: -1.0
+  scalar: -1
   sub {
     subscalar: -1
   }
@@ -534,7 +534,7 @@ class TestConvWithOverrides(unittest.TestCase):
         )
         EXPECTED_MSG = """
 test {
-  scalar: 3.0
+  scalar: 3
   sub {
     subscalar: -1
   }

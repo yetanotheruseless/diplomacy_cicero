@@ -134,10 +134,11 @@ except Exception:  # noqa: BLE001 - secret optional; ephemeral token fallback
     secrets=_TOKEN_SECRETS,
     scaledown_window=SCALEDOWN_WINDOW,
     min_containers=MIN_CONTAINERS,
+    max_containers=1,  # HARD cap: never scale past ONE GPU (a single game's seats serialize fine)
     startup_timeout=STARTUP_TIMEOUT,
     timeout=24 * 3600,
 )
-@modal.concurrent(max_inputs=1)  # one GPU => serialize search; scale OUT under load
+@modal.concurrent(max_inputs=8)  # absorb the concurrent cicero-seat requests on the ONE capped GPU — do NOT scale out
 class CiceroModernOracle:
     """Scale-to-zero modern-Cicero oracle (imitation tier) over HTTP."""
 
