@@ -243,7 +243,9 @@ class BaseStrategyModelRollouts:
                     # for games that stopped early due to being completed,
                     # but this is fine since it will just be averaging in the same score again.
                     # Shape: [num_games, num_powers, 1]
-                    scores = torch.FloatTensor([game.get_scores() for game in games]).unsqueeze(-1)
+                    scores = torch.tensor(
+                        [game.get_scores() for game in games], dtype=torch.float32
+                    ).unsqueeze(-1)
                     spring_ending_ev += scores * (end_prob * (1.0 - cumulative_spring_ending_prob))
                     cumulative_spring_ending_prob += end_prob * (
                         1.0 - cumulative_spring_ending_prob
@@ -312,20 +314,26 @@ class BaseStrategyModelRollouts:
                 ],
                 -1,
             )
-            not_done_games_mask = torch.BoolTensor([not game.is_game_done for game in games])
+            not_done_games_mask = torch.tensor(
+                [not game.is_game_done for game in games], dtype=torch.bool
+            )
             # Extra float() to handle half().
             final_scores[not_done_games_mask] = final_scores_per_base_strategy_model.float().cpu()
 
         timings.start("final_scores")
         for i, game in enumerate(games):
             if game.is_game_done:
-                final_scores[i] = torch.FloatTensor(game.get_scores()).unsqueeze(-1)
+                final_scores[i] = torch.tensor(game.get_scores(), dtype=torch.float32).unsqueeze(
+                    -1
+                )
 
         # mix in current sum of squares ratio to encourage losing powers to try hard
         # get GameScores objects for current game state
         if self.mix_square_ratio_scoring > 0:
             # Shape: [num_games, num_powers, 1]
-            sos_scores = torch.FloatTensor([game.get_scores() for game in games]).unsqueeze(-1)
+            sos_scores = torch.tensor(
+                [game.get_scores() for game in games], dtype=torch.float32
+            ).unsqueeze(-1)
             final_scores = (1 - self.mix_square_ratio_scoring) * final_scores + (
                 self.mix_square_ratio_scoring * sos_scores
             )
@@ -341,9 +349,13 @@ class BaseStrategyModelRollouts:
                     final_spring_ending_ev[i, :] = [score * p for score in game.get_scores()]
                     final_spring_ending_prob[i] = p
 
-            spring_ending_ev += torch.FloatTensor(final_spring_ending_ev).unsqueeze(-1)
+            spring_ending_ev += torch.tensor(
+                final_spring_ending_ev, dtype=torch.float32
+            ).unsqueeze(-1)
             cumulative_spring_ending_prob += (
-                torch.FloatTensor(final_spring_ending_prob).unsqueeze(-1).unsqueeze(-1)
+                torch.tensor(final_spring_ending_prob, dtype=torch.float32)
+                .unsqueeze(-1)
+                .unsqueeze(-1)
             )
 
             final_scores = (1.0 - cumulative_spring_ending_prob) * final_scores + spring_ending_ev

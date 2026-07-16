@@ -1039,7 +1039,7 @@ class TheBestAgent(BaseSearchAgent):
         bp_probs: List[float] = [bp_policy[pwr][action] for action in actions]
         utilities: List[float] = [power_evs[pwr][action] for action in actions]
         utilities_policy: List[float] = torch.softmax(
-            torch.FloatTensor(utilities) / self.qre_lambda, -1
+            torch.tensor(utilities, dtype=torch.float32) / self.qre_lambda, -1
         ).tolist()
         sorted_metrics = sorted(
             zip(actions, pikl_probs, bp_probs, utilities_policy, utilities), key=lambda ac: -ac[1],
