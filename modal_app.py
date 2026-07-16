@@ -23,7 +23,6 @@ Usage:
 import os
 import pathlib
 import secrets
-import subprocess
 
 import modal
 
@@ -551,17 +550,31 @@ def _inline_smoke(url, token, tiers, full_press):
 
 @app.local_entrypoint()
 def serve(tiers: str = "searchbot", port: int = 8000, gpu: str = "A10G",
-          timeout: int = 3600, token: str = "", smoke: bool = False,
+          timeout: int = 21600, idle_timeout: int = 1800, persist: bool = False,
+          token: str = "", smoke: bool = False,
           full_press: bool = False, rollouts: int = 0):
     """Serve the agentic-diplomacy oracle HTTP front over a Modal tunnel.
 
-    tiers:   comma-separated subset of TIER_PRESETS to load into one process
-             (no-press tiers are light and co-resident; use a dedicated A100
-             `serve` for `cicero`, e.g. --tiers cicero --gpu A100-80GB).
-    smoke:   if set, run an inline info/get_orders/policy/value smoke against the
-             tunnel (add --full-press to also exercise generate_message) and exit.
-    Prints the tunnel URL + bearer token; wire them into the MCP registry as an
-    `http` tier. Without --smoke the box stays warm until `timeout`.
+    tiers:        comma-separated subset of TIER_PRESETS to load into one process
+                  (no-press tiers are light and co-resident; use a dedicated A100
+                  `serve` for `cicero`, e.g. --tiers cicero --gpu A100-80GB).
+    timeout:      hard max Sandbox lifetime (seconds). Default 6h — generous so a
+                  long game isn't cut off mid-phase (the old 1h default killed
+                  active games). `idle_timeout` is what normally tears it down.
+    idle_timeout: terminate the Sandbox after this many seconds with NO tunnel
+                  traffic → zero GPU cost when no game is using it. The runner pings
+                  /health while a game is active to keep it warm; a paused game lets
+                  it idle down. (Requires a recent `modal` client; Sandbox
+                  idle-timeout shipped Sep 2025.)
+    persist:      if set, leave the Sandbox running server-side and return (scale-to-
+                  zero mode): it idles down on its own, and the runner re-spawns this
+                  command when it finds the oracle gone. Without --persist the box is
+                  kept warm from here until Ctrl-C / `timeout`. (Named `persist`, not
+                  `detach`, to avoid colliding with `modal run --detach`.)
+    smoke:        run an inline info/get_orders/policy/value smoke (add --full-press
+                  to also exercise generate_message) and exit.
+    Prints the tunnel URL + bearer token + Sandbox id; wire URL/token into the MCP
+    registry as an `http` tier.
     """
     import threading
     import time
@@ -571,16 +584,28 @@ def serve(tiers: str = "searchbot", port: int = 8000, gpu: str = "A10G",
     unknown = [t for t in tier_list if t not in TIER_PRESETS]
     if unknown:
         raise ValueError(f"unknown tiers {unknown}; choose from {sorted(TIER_PRESETS)}")
+    if persist and idle_timeout <= 0:
+        raise ValueError("--persist requires a positive --idle-timeout")
     token = token or secrets.token_urlsafe(24)
 
-    sb = modal.Sandbox.create(
+    start_t = time.time()
+    deadline = start_t + timeout
+    create_kwargs = dict(
         app=app, image=_serving_image(), gpu=gpu, volumes=VOL,
         encrypted_ports=[port], timeout=timeout, cpu=8.0, memory=49152,
     )
+    if idle_timeout and idle_timeout > 0:
+        create_kwargs["idle_timeout"] = idle_timeout
+    # Run the oracle as the Sandbox entrypoint, not through sb.exec(). Modal
+    # considers an active exec command to be activity, so a long-lived server
+    # launched with sb.exec() would prevent idle_timeout from ever firing.
+    sb = modal.Sandbox.create(
+        "bash", "-lc", _oracle_cmd(tier_list, port, token, rollouts), **create_kwargs
+    )
+    terminate_on_exit = True
     try:
-        proc = sb.exec("bash", "-lc", _oracle_cmd(tier_list, port, token, rollouts))
         # Stream server logs in the background so a crash's traceback is visible.
-        for s in (proc.stdout, proc.stderr):
+        for s in (sb.stdout, sb.stderr):
             threading.Thread(target=lambda st: [print(line, end="", flush=True) for line in st],
                              args=(s,), daemon=True).start()
         url = sb.tunnels()[port].url
@@ -588,30 +613,61 @@ def serve(tiers: str = "searchbot", port: int = 8000, gpu: str = "A10G",
         print(f"oracle serving tiers={tier_list} gpu={gpu}")
         print(f"  URL:   {url}")
         print(f"  TOKEN: {token}")
+        print(f"  SANDBOX: {sb.object_id}   (idle_timeout={idle_timeout}s, max_lifetime={timeout}s)")
         print('  MCP registry: {"transport":"http","url":"%s","token_env":"ORACLE_TOKEN"}' % url)
         print("=" * 72, flush=True)
 
-        # Supervise: wait for /health, optionally smoke, then keep warm. Polling
-        # /health from here (the local entrypoint) also keeps the sandbox alive
-        # without depending on the server process to block the entrypoint.
-        deadline = time.time() + timeout
+        # Wait for readiness (model load can take minutes). Polling /health from the
+        # entrypoint also counts as tunnel activity, keeping the box warm.
+        ready_deadline = min(deadline, start_t + 1800)
         healthy = False
-        while time.time() < deadline:
-            rc = proc.poll()
+        while time.time() < ready_deadline and not healthy:
+            rc = sb.poll()
             if rc is not None:
                 print(f"!! oracle process exited rc={rc} (see logs above)", flush=True)
                 return
+            try:
+                with urllib.request.urlopen(url.rstrip("/") + "/health", timeout=10) as r:
+                    healthy = r.status == 200
+            except Exception:
+                healthy = False
             if not healthy:
-                try:
-                    with urllib.request.urlopen(url.rstrip("/") + "/health", timeout=10) as r:
-                        healthy = r.status == 200
-                except Exception:
-                    healthy = False
-                if healthy:
-                    print("[serve] /health OK — oracle ready", flush=True)
-                    if smoke:
-                        _inline_smoke(url, token, tier_list, full_press)
-                        return
+                time.sleep(5)
+        if not healthy:
+            print("!! oracle never became healthy before deadline", flush=True)
+            return
+        print("[serve] /health OK — oracle ready", flush=True)
+
+        if smoke:
+            _inline_smoke(url, token, tier_list, full_press)
+            return
+
+        if persist:
+            # Scale-to-zero: hand the Sandbox off to Modal and return. It auto-
+            # terminates after idle_timeout s of no tunnel traffic; the runner keeps
+            # it warm during play and re-spawns this command when it has idled down.
+            print(f"[serve] persisting — Sandbox {sb.object_id} stays up; idles down after "
+                  f"{idle_timeout}s with no traffic. Stop now with "
+                  f"`modal sandbox terminate {sb.object_id}`.", flush=True)
+            terminate_on_exit = False
+            sb.detach()
+            return
+
+        # Blocking keep-warm: hold the box up (and ping /health) until max lifetime
+        # or Ctrl-C. idle_timeout is the safety net if these pings ever stop.
+        while time.time() < deadline:
+            if sb.poll() is not None:
+                print("!! oracle process exited (see logs above)", flush=True)
+                return
+            try:
+                with urllib.request.urlopen(url.rstrip("/") + "/health", timeout=10):
+                    pass
+            except Exception:
+                pass
             time.sleep(5)
     finally:
-        sb.terminate()
+        if terminate_on_exit:
+            try:
+                sb.terminate()
+            finally:
+                sb.detach()
