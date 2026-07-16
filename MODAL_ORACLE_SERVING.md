@@ -10,7 +10,7 @@ HTTP. Harness: **`modal_serve.py`**.
 | | |
 |---|---|
 | **URL** | `https://jakemannix--cicero-modern-oracle.modal.run` |
-| **Token** | bearer token in the `cicero-oracle-token` Modal Secret (`ORACLE_TOKEN`); current value `<ORACLE_TOKEN>` |
+| **Token** | bearer token in the `cicero-oracle-token` Modal Secret (`ORACLE_TOKEN`); never store its value in the repository |
 | **Tier** | `imitation` — no-press `base_strategy_model` agent + `no_press_human_imitation_policy.ckpt` |
 | **GPU** | A10G, `scaledown_window=120s` (raise for production), `min_containers=0` |
 | **App** | `cicero-modern-oracle` (Modal app id `ap-Rtxiv2zpjjjz2lWlke40hw`) |
@@ -72,8 +72,7 @@ generate cleanly.
 
 Point the runner's oracle client at:
 - `--modal-url https://jakemannix--cicero-modern-oracle.modal.run`
-- token via `ORACLE_TOKEN=<ORACLE_TOKEN>` (from the
-  `cicero-oracle-token` Secret).
+- token via `ORACLE_TOKEN` loaded from the `cicero-oracle-token` Secret.
 
 Redeploy with a longer `scaledown_window` for an extended game:
 `ORACLE_SCALEDOWN_WINDOW=600 modal deploy modal_serve.py`.

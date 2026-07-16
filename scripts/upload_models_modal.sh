@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -u
-cd /Users/jake/src/open_src/diplomacy_cicero
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || exit
 source scripts/_modal_auth.sh
 VOL=cicero-models
 STAGE=.cicero_model_stage
@@ -9,7 +9,7 @@ have_root="$(modal volume ls "$VOL" / 2>/dev/null)"
 have_ne="$(modal volume ls "$VOL" /nonsense_ensemble 2>/dev/null)"
 ok=0; skip=0; fail=0
 while IFS= read -r f; do
-  rel="${f#$STAGE/}"                      # e.g. dialogue or nonsense_ensemble/location
+  rel="${f#"$STAGE"/}"                  # e.g. dialogue or nonsense_ensemble/location
   base="$(basename "$rel")"
   if [[ "$rel" == nonsense_ensemble/* ]]; then haystack="$have_ne"; else haystack="$have_root"; fi
   if grep -qF "$base" <<<"$haystack"; then echo "skip  $rel"; skip=$((skip+1)); continue; fi

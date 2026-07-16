@@ -7,6 +7,14 @@
 
 *.pt
 *.pth
+*.ckpt
+*.gpg
+*.torch
+
+# Downloaded Cicero model weights and local deployment staging.
+/.cicero_model_stage/
+/models/
+/models_encrypted/
 
 __pycache__
 fairdiplomacy.egg-info/
@@ -37,9 +45,17 @@ dipcc/Testing/
 .nfs*
 /fairdiplomacy/selfplay/*.so
 /fairdiplomacy/*.so
+*.so
+/dipcc_pkg/
 /src/
 dipcc/detect_cuda_version.cc
 node_modules/
+
+# Local experiment, game, and editor backup output.
+/diplomacy_experiments/
+/game_state.json
+/modal_cicero_game_*.partial.json
+*.bak
 
 **/.claude/settings.local.json
 .venv-modern/
