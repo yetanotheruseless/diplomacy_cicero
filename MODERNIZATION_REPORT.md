@@ -7,8 +7,7 @@
 **Environment:** macOS 26.2, **arm64, no CUDA**. All work below is CPU/arm64.
 Anything needing x86_64+CUDA is explicitly marked "needs container/Modal to validate".
 
-**Branch:** `wip/modernize-python` in worktree
-`/Users/jake/src/open_src/diplomacy_cicero-py3modern`. uv-managed env at
+**Branch:** `wip/modernize-python`. The uv-managed environment lives at
 `.venv-modern` (Python 3.11.10).
 
 ---
