@@ -2,8 +2,8 @@
 
 This is the capstone of the modernization spike: it serves the modern Cicero
 (Python 3.11 / torch 2.6 cu124 / modern protobuf / pydipcc / pure-Python nest
-shim — built and validated in ``modal_modern.py``) as the live ``imitation``
-tier oracle that ``agentic-diplomacy``'s runner consumes over HTTP.
+shim — built and validated in ``modal_modern.py``) as live ``imitation`` and
+``searchbot`` oracle tiers that ``agentic-diplomacy`` consumes over HTTP.
 
 Why this is *simpler* than the legacy dual-python serving (``modal_function.py``
 in the sibling worktree): that one had to overlay a Python-3.11 standalone next
@@ -25,12 +25,13 @@ Wire contract (``agentic-diplomacy/oracle/transport.py::HttpTransport``):
   GET  /health  -> 200 {"status":"ok","ready":true}
   POST /rpc     -> {"id","method","params"} (+ ``Authorization: Bearer <token>``)
                    answered {"id","ok":true,"result":{...}}
-  Bearer token read from the ``ORACLE_TOKEN`` env (Modal Secret for a stable
-  value across cold starts; else an ephemeral one is minted and logged).
+  Bearer token read from the required ``ORACLE_TOKEN`` env (provided by a Modal
+  Secret). Token values are never logged.
 
-The ``imitation`` tier is no-press and light: it serves the ``base_strategy_model``
-agent backed by the real ``no_press_human_imitation_policy.ckpt`` (the B1/B2
-checkpoint) from the ``cicero-models`` Volume.
+Both tiers are no-press. ``imitation`` serves the ``base_strategy_model`` agent
+backed by ``no_press_human_imitation_policy.ckpt``; ``searchbot`` runs Cicero's
+CFR search over ``rl_search_orders.ckpt`` and ``rl_value_function.ckpt``. The
+models come from the ``cicero-models`` Volume.
 
 Deploy + verify:
   modal deploy modal_serve.py
@@ -38,7 +39,6 @@ Deploy + verify:
 """
 import os
 import pathlib
-import secrets
 import subprocess
 import time
 
@@ -65,6 +65,28 @@ ORACLE_FILES = [
 # overridden to the real human-imitation policy checkpoint on the Volume.
 IMITATION_CONFIG = "conf/common/agents/base_strategy_model.prototxt"
 IMITATION_MODEL = "models/no_press_human_imitation_policy.ckpt"
+# The RL value net — served as `value` (per-power positional vector) on both tiers.
+VALUE_MODEL = "models/rl_value_function.ckpt"
+# The searchbot tier: CFR/bqre1p search (Cicero's tactical core) -> search-refined `policy`
+# + `value`. Its `policy` comes from run_search (cicero_backend's existing path), giving
+# search-refined candidates rather than the imitation blueprint.
+SEARCHBOT_CONFIG = "conf/common/agents/searchbot.prototxt"
+SEARCHBOT_MODEL = "models/rl_search_orders.ckpt"
+SEARCHBOT_ROLLOUTS = int(
+    os.environ.get("ORACLE_SEARCHBOT_ROLLOUTS", "8")
+)  # small for serving latency
+# Which tiers this Function loads (co-resident, no-press). Default: both.
+TIERS = [
+    tier.strip()
+    for tier in os.environ.get("ORACLE_TIERS", "imitation,searchbot").split(",")
+    if tier.strip()
+]
+SUPPORTED_TIERS = {"imitation", "searchbot"}
+unsupported_tiers = set(TIERS) - SUPPORTED_TIERS
+if not TIERS:
+    raise ValueError("ORACLE_TIERS must select at least one tier")
+if unsupported_tiers:
+    raise ValueError(f"unsupported ORACLE_TIERS: {sorted(unsupported_tiers)}")
 
 PORT = int(os.environ.get("ORACLE_PORT", "8000"))
 GPU = os.environ.get("ORACLE_GPU", "A10G")
@@ -104,26 +126,50 @@ def _serving_image() -> modal.Image:
 
 
 def _oracle_argv(token: str) -> list:
-    """argv for oracle_server.py serving the imitation tier over HTTP on PORT."""
-    return [
+    """argv for oracle_server.py serving the configured TIERS over HTTP on PORT.
+
+    - imitation: base_strategy_model agent; `policy` = blueprint distribution sampled from the
+      imitation policy net (cicero_backend._blueprint_policy, no search); `value` = RL value net.
+    - searchbot: CFR/bqre1p search agent; `policy` = search-refined distribution (run_search);
+      `value` = RL value net. Heavier per call; n_rollouts kept small for serving latency.
+    Both tiers are no-press, so `value` is a positional read.
+    """
+    argv = [
         "python", "-u", "/opt/oracle/oracle_server.py",
         "--transport", "http", "--host", "0.0.0.0", "--port", str(PORT),
         "--device", "cuda",
-        "--agent", f"imitation={IMITATION_CONFIG}",
-        # base_strategy_model.prototxt hardcodes models/blueprint.pt (absent on the
-        # Volume); point it at the real human-imitation policy checkpoint.
-        "--override", f"imitation:base_strategy_model.model_path={IMITATION_MODEL}",
     ]
+    if "imitation" in TIERS:
+        argv += [
+            "--agent", f"imitation={IMITATION_CONFIG}",
+            # base_strategy_model.prototxt hardcodes models/blueprint.pt (absent on the
+            # Volume); point it at the real human-imitation policy checkpoint.
+            "--override", f"imitation:base_strategy_model.model_path={IMITATION_MODEL}",
+            "--value-model", f"imitation={VALUE_MODEL}",
+            "--no-press", "imitation",
+        ]
+    if "searchbot" in TIERS:
+        argv += [
+            "--agent", f"searchbot={SEARCHBOT_CONFIG}",
+            # searchbot.prototxt defaults model_path to the absent blueprint.pt; point it at
+            # the RL search-orders net, and the CFR rollouts' value head at the RL value net.
+            "--override", f"searchbot:searchbot.model_path={SEARCHBOT_MODEL}",
+            "--override", f"searchbot:searchbot.value_model_path={VALUE_MODEL}",
+            "--override", f"searchbot:searchbot.n_rollouts={SEARCHBOT_ROLLOUTS}",
+            "--value-model", f"searchbot={VALUE_MODEL}",
+            "--no-press", "searchbot",
+        ]
+    return argv
 
 
 app = modal.App("cicero-modern-oracle")
 
 # A stable bearer token across cold starts. Create once with:
 #   modal secret create cicero-oracle-token ORACLE_TOKEN=<value>
-# If the secret is absent, _start() mints an ephemeral token and logs it.
+# The server refuses to start without ORACLE_TOKEN; it never mints or logs one.
 try:
     _TOKEN_SECRETS = [modal.Secret.from_name("cicero-oracle-token")]
-except Exception:  # noqa: BLE001 - secret optional; ephemeral token fallback
+except Exception:  # noqa: BLE001 - env injection remains available for local runs
     _TOKEN_SECRETS = []
 
 
@@ -140,13 +186,16 @@ except Exception:  # noqa: BLE001 - secret optional; ephemeral token fallback
 )
 @modal.concurrent(max_inputs=8)  # absorb the concurrent cicero-seat requests on the ONE capped GPU — do NOT scale out
 class CiceroModernOracle:
-    """Scale-to-zero modern-Cicero oracle (imitation tier) over HTTP."""
+    """Scale-to-zero modern-Cicero oracle for the configured tiers over HTTP."""
 
     @modal.enter()
     def _start(self) -> None:
-        token = os.environ.get("ORACLE_TOKEN") or secrets.token_urlsafe(24)
-        if not os.environ.get("ORACLE_TOKEN"):
-            print(f"[enter] no ORACLE_TOKEN set; minted ephemeral token: {token}", flush=True)
+        token = os.environ.get("ORACLE_TOKEN")
+        if not token:
+            raise RuntimeError(
+                "ORACLE_TOKEN is required; provide it through the cicero-oracle-token "
+                "Modal Secret"
+            )
         env = dict(os.environ)
         env.setdefault("PYTHONPATH", "/app")
         env["ORACLE_TOKEN"] = token
@@ -202,7 +251,14 @@ def _web_url() -> str:
 def info() -> None:
     """Print the deployed URL + how to wire the runner (no GPU spent)."""
     print("Modern Cicero oracle Function:")
-    print(f"  tier             = imitation ({IMITATION_CONFIG} + {IMITATION_MODEL})")
+    print(f"  tiers            = {', '.join(TIERS)}")
+    if "imitation" in TIERS:
+        print(f"  imitation        = {IMITATION_CONFIG} + {IMITATION_MODEL} + {VALUE_MODEL}")
+    if "searchbot" in TIERS:
+        print(
+            f"  searchbot        = {SEARCHBOT_CONFIG} + {SEARCHBOT_MODEL} + {VALUE_MODEL} "
+            f"({SEARCHBOT_ROLLOUTS} rollouts)"
+        )
     print(f"  gpu              = {GPU}")
     print(f"  port             = {PORT}")
     print(f"  scaledown_window = {SCALEDOWN_WINDOW}s")
@@ -264,16 +320,20 @@ def verify(url: str = "", token: str = "") -> None:
     info_resp = _rpc("info", {}, timeout=120)
     print(f"[verify] info -> {json.dumps(info_resp)[:300]}")
 
-    # 3) real get_orders for FRANCE on the opening board
+    # 3) real get_orders for FRANCE on the opening board, once per configured tier
     game_json = json.dumps(_OPENING_GAME)
-    res = _rpc("get_orders", {"game_json": game_json, "power": "FRANCE",
-                              "tier": "imitation"}, timeout=600)
-    if not res.get("ok"):
-        raise SystemExit(f"get_orders failed: {res.get('error')}")
-    orders = res["result"]["orders"]
-    print(f"[verify] get_orders(FRANCE) -> {orders}")
-    assert orders and all(isinstance(o, str) for o in orders), f"bad orders: {orders}"
-    print("[verify] PASS: modern Cicero served valid orders over HTTP")
+    for tier in TIERS:
+        res = _rpc(
+            "get_orders",
+            {"game_json": game_json, "power": "FRANCE", "tier": tier},
+            timeout=600,
+        )
+        if not res.get("ok"):
+            raise SystemExit(f"get_orders({tier}) failed: {res.get('error')}")
+        orders = res["result"]["orders"]
+        print(f"[verify] get_orders({tier}, FRANCE) -> {orders}")
+        assert orders and all(isinstance(o, str) for o in orders), f"bad orders: {orders}"
+    print(f"[verify] PASS: modern Cicero served valid orders for {', '.join(TIERS)}")
 
     # 4) scale-to-zero: wait past the window, then check task count via `modal app list`
     print(f"[verify] waiting {SCALEDOWN_WINDOW + 60}s for scale-to-zero ...")

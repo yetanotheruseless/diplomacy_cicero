@@ -1,17 +1,17 @@
 # Modern Cicero Oracle — scale-to-zero Modal serving
 
 Capstone of the modernization spike: the modernized Cicero (Python 3.11 / torch
-2.6 cu124 / modern protobuf / pydipcc / pure-Python `nest` shim) served as the
-live **`imitation`** tier oracle that `agentic-diplomacy`'s runner consumes over
-HTTP. Harness: **`modal_serve.py`**.
+2.6 cu124 / modern protobuf / pydipcc / pure-Python `nest` shim) serves the live
+no-press **`imitation`** and **`searchbot`** oracle tiers that
+`agentic-diplomacy` consumes over HTTP. Harness: **`modal_serve.py`**.
 
 ## Deployed endpoint
 
 | | |
 |---|---|
 | **URL** | `https://jakemannix--cicero-modern-oracle.modal.run` |
-| **Token** | bearer token in the `cicero-oracle-token` Modal Secret (`ORACLE_TOKEN`); current value `<ORACLE_TOKEN>` |
-| **Tier** | `imitation` — no-press `base_strategy_model` agent + `no_press_human_imitation_policy.ckpt` |
+| **Token** | bearer token supplied at runtime through `ORACLE_TOKEN` from the `cicero-oracle-token` Modal Secret; never commit or print its value |
+| **Tiers** | `imitation` — `base_strategy_model` + human-imitation policy; `searchbot` — CFR search + RL policy/value models |
 | **GPU** | A10G, `scaledown_window=120s` (raise for production), `min_containers=0` |
 | **App** | `cicero-modern-oracle` (Modal app id `ap-Rtxiv2zpjjjz2lWlke40hw`) |
 
@@ -22,9 +22,10 @@ GET  /health  -> 200 {"status":"ok","ready":true}
 POST /rpc     -> {"id","method","params"}  (+ Authorization: Bearer <ORACLE_TOKEN>)
               -> {"id","ok":true,"result":{...}}   |   {"id","ok":false,"error":...}
 ```
-`get_orders` params: `{game_json, power, tier:"imitation", seed?}` -> `{orders:[str]}`.
+`get_orders` params: `{game_json, power, tier:"imitation|searchbot", seed?}` ->
+`{orders:[str]}`.
 
-## Verification evidence (real requests against the deployed URL)
+## Initial deployment evidence (imitation tier)
 
 ```
 /health -> 200 {'status': 'ok', 'ready': True}            # cold start
@@ -72,21 +73,21 @@ generate cleanly.
 
 Point the runner's oracle client at:
 - `--modal-url https://jakemannix--cicero-modern-oracle.modal.run`
-- token via `ORACLE_TOKEN=<ORACLE_TOKEN>` (from the
+- token via `ORACLE_TOKEN='<value from your secret manager>'` (matching
   `cicero-oracle-token` Secret).
 
 Redeploy with a longer `scaledown_window` for an extended game:
 `ORACLE_SCALEDOWN_WINDOW=600 modal deploy modal_serve.py`.
 
-## Known caveats / honesty
+## Operational notes
 
-- `info` reports `full_press: true` for the `imitation` tier because the oracle's
-  `schema.FULL_PRESS_TIERS` (in agentic-diplomacy, read-only here) lists
-  `imitation`. This is cosmetic for `get_orders` (no-press) — the agent is the
-  no-press `base_strategy_model`. `generate_message`/press-aware `value` are not
-  served by this tier as configured (no dialogue model / value net wired).
-- `input_version: null` in `info` because no value-model is configured (the
-  imitation tier doesn't need one for `get_orders`); the version is sniffed from a
-  value wrapper, which isn't built here.
-- Only `get_orders` was integration-tested. `policy` needs a search agent (not
-  this tier); `value`/`generate_message` need a value-net / dialogue model wired.
+- The default deployment co-resides `imitation` and `searchbot`; set
+  `ORACLE_TIERS` to a comma-separated subset when only one tier is needed.
+- `ORACLE_SEARCHBOT_ROLLOUTS` controls the searchbot latency/quality tradeoff and
+  defaults to 8 for serving latency.
+- Both tiers are explicitly no-press and use `rl_value_function.ckpt` for
+  positional values. Searchbot policy calls return search-refined candidates;
+  imitation policy calls use the policy-net sampling path.
+- `modal run modal_serve.py::verify` exercises `get_orders` for every configured
+  tier. Run it after deployment because the full check needs the Modal GPU image
+  and model Volume.
