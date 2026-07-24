@@ -5,15 +5,37 @@ Capstone of the modernization spike: the modernized Cicero (Python 3.11 / torch
 no-press **`imitation`** and **`searchbot`** oracle tiers that
 `agentic-diplomacy` consumes over HTTP. Harness: **`modal_serve.py`**.
 
-## Deployed endpoint
+## Deploy your own endpoint
+
+There is no shared/hosted instance — you deploy the oracle into **your own Modal
+workspace**:
+
+```bash
+modal secret create cicero-oracle-token ORACLE_TOKEN=<a token you generate>
+modal deploy modal_serve.py
+```
+
+`modal deploy` prints the stable web URL it assigned. Modal derives it from your
+workspace name and the app/class name, so it has the shape:
+
+```
+https://<your-workspace>--cicero-modern-oracle.modal.run
+```
+
+Substitute that URL (and `modal app list` / the Modal dashboard for the app id)
+everywhere this document writes `<your-workspace>`. The URL is stable across
+redeploys of the same app in the same workspace.
 
 | | |
 |---|---|
-| **URL** | `https://jakemannix--cicero-modern-oracle.modal.run` |
+| **URL** | `https://<your-workspace>--cicero-modern-oracle.modal.run` (printed by `modal deploy`) |
 | **Token** | bearer token supplied at runtime through `ORACLE_TOKEN` from the `cicero-oracle-token` Modal Secret; never commit or print its value |
 | **Tiers** | `imitation` — `base_strategy_model` + human-imitation policy; `searchbot` — CFR search + RL policy/value models |
 | **GPU** | A10G, `scaledown_window=120s` (raise for production), `min_containers=0` |
-| **App** | `cicero-modern-oracle` (Modal app id `ap-Rtxiv2zpjjjz2lWlke40hw`) |
+| **App** | `cicero-modern-oracle` (app id visible via `modal app list`) |
+
+Prerequisite: the model weights must already be in the Modal Volume this stack
+reads from — see `scripts/upload_models_modal.sh`.
 
 ## Wire contract (matches `agentic-diplomacy/oracle/transport.py::HttpTransport`)
 
@@ -26,6 +48,9 @@ POST /rpc     -> {"id","method","params"}  (+ Authorization: Bearer <ORACLE_TOKE
 `{orders:[str]}`.
 
 ## Initial deployment evidence (imitation tier)
+
+Captured from a real deployment during the modernization spike; the deploying
+workspace name is redacted as `<workspace>`.
 
 ```
 /health -> 200 {'status': 'ok', 'ready': True}            # cold start
@@ -72,7 +97,8 @@ generate cleanly.
 ## Wiring the runner
 
 Point the runner's oracle client at:
-- `--modal-url https://jakemannix--cicero-modern-oracle.modal.run`
+- `--modal-url https://<your-workspace>--cicero-modern-oracle.modal.run` (the URL
+  `modal deploy` printed for your workspace)
 - token via `ORACLE_TOKEN='<value from your secret manager>'` (matching
   `cicero-oracle-token` Secret).
 
