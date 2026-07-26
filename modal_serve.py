@@ -181,7 +181,8 @@ def _oracle_argv() -> list[str]:
     return argv
 
 
-app = modal.App("cicero-modern-oracle")
+APP_NAME = "cicero-modern-oracle"
+app = modal.App(APP_NAME)
 
 # A stable bearer token across cold starts. Create once with:
 #   export ORACLE_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
@@ -289,8 +290,14 @@ _OPENING_GAME = {
 
 
 def _web_url() -> str:
-    """Resolve the deployed web_server URL from the class method."""
-    return CiceroModernOracle().web.get_web_url()
+    """Resolve the stable deployed URL, even when called by ``modal run``.
+
+    The module-local class belongs to the temporary ``-dev`` app created for a
+    local entrypoint. Looking up the deployed class by name prevents ``info``
+    and ``verify`` from accidentally targeting that ephemeral app.
+    """
+    deployed = modal.Cls.from_name(APP_NAME, "CiceroModernOracle")
+    return deployed().web.get_web_url()
 
 
 @app.local_entrypoint()
