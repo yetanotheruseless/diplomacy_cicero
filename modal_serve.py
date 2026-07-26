@@ -165,7 +165,8 @@ def _oracle_argv(token: str) -> list:
 app = modal.App("cicero-modern-oracle")
 
 # A stable bearer token across cold starts. Create once with:
-#   modal secret create cicero-oracle-token ORACLE_TOKEN=<value>
+#   export ORACLE_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+#   modal secret create cicero-oracle-token ORACLE_TOKEN="$ORACLE_TOKEN"
 # The server refuses to start without ORACLE_TOKEN; it never mints or logs one.
 try:
     _TOKEN_SECRETS = [modal.Secret.from_name("cicero-oracle-token")]
