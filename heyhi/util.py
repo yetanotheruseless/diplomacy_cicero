@@ -25,7 +25,46 @@ import socket
 import sys
 import time
 
-import submitit
+try:
+    import submitit
+except ImportError:
+    submitit = None
+    print('Warning: submitit not available, some functionality will be limited')
+
+# Create dummy classes if submitit is not available
+if submitit is None:
+    class DummyJobEnvironment:
+        def __init__(self):
+            self.job_id = "dummy_job"
+            self.num_tasks = 1
+            self.num_nodes = 1
+            self.node = 0
+            self.global_rank = 0
+            self.local_rank = 0
+            self.hostname = "localhost"
+        
+        def activated(self):
+            return False
+    
+    class DummySubmitit:
+        class JobEnvironment(DummyJobEnvironment):
+            pass
+        
+        class AutoExecutor:
+            def __init__(self, *args, **kwargs):
+                pass
+            
+            def update_parameters(self, *args, **kwargs):
+                pass
+            
+            def submit(self, *args, **kwargs):
+                raise NotImplementedError("submitit is not available")
+        
+        class SlurmExecutor(AutoExecutor):
+            pass
+    
+    # Replace None with the dummy implementation
+    submitit = DummySubmitit
 import torch
 
 from . import conf
@@ -57,7 +96,7 @@ def reset_slurm_cache():
     _SLURM_CACHE.clear()
 
 
-def get_job_env() -> submitit.JobEnvironment:
+def get_job_env():
     """Get info about the job including global_rank, local_rank, and num_tasks.
 
     See submitit docs for all fields.
@@ -78,6 +117,8 @@ def is_devfair():
 
 
 def get_slurm_master():
+    if submitit is None:
+        return None
     if "SLURM_JOB_NODELIST" not in os.environ:
         # Either devfair or CI.
         return "localhost"
@@ -383,8 +424,11 @@ def save_result_in_cwd(f):
         result = f(*args, **kwargs)
         result_path = os.path.join(os.getcwd(), RESULTFILE_NAME)
         if is_master():
-            logging.info("Saving result to %s", result_path)
-            torch.save(result, result_path)
+            if 'torch' in sys.modules:  # Check if torch is available
+                logging.info("Saving result to %s", result_path)
+                torch.save(result, result_path)
+            else:
+                logging.warning("torch is not available, skipping result saving")
         return result
 
     return wrapped

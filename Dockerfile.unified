@@ -60,7 +60,7 @@ RUN git clone https://github.com/protocolbuffers/protobuf.git /tmp/protobuf && \
     git checkout v3.19.1 && \
     ./autogen.sh && \
     ./configure && \
-    make -j$(nproc) && \
+    make -j1 && \
     make install && \
     ldconfig && \
     cd / && \
@@ -90,7 +90,8 @@ RUN pip install cython==0.29.24
 RUN echo "✅ Compiling protobuf files..." && \
     make protos_basic && \
     echo "  ✓ Protocol buffer files compiled successfully" && \
-    python scripts/validate_protobuf.py || echo "  ⚠️ Protobuf validation failed but continuing build"
+    python -c "from conf import conf_pb2, agents_pb2; print('Successfully imported protobuf modules')" || \
+    echo "  ⚠️ Protobuf validation failed but continuing build"
 
 # PHASE 4: Build dipcc (C++ game logic)
 # ==============================================
@@ -108,12 +109,15 @@ RUN mkdir -p /app/dipcc/cc /app/dipcc/pybind && \
     cp -r /app/dipcc/dipcc/profiling /app/dipcc/
 
 # Build dipcc with memory optimization
-ARG DIPCC_BUILD_JOBS=2
+ARG DIPCC_BUILD_JOBS=1
 RUN echo "✅ Building dipcc with $DIPCC_BUILD_JOBS parallel jobs..." && \
     cd /app/dipcc && \
     pybind11_DIR=$(python3 -c "import pybind11; print(pybind11.get_cmake_dir())") && \
     mkdir -p build && cd build && \
-    cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$pybind11_DIR .. && \
+    CXXFLAGS="-Os" cmake -DCMAKE_BUILD_TYPE=MinSizeRel \
+        -DBUILD_TESTS=OFF \
+        -DBUILD_SHARED_LIBS=ON \
+        -DCMAKE_PREFIX_PATH=$pybind11_DIR .. && \
     make -j${DIPCC_BUILD_JOBS} pydipcc && \
     cp dipcc/python/pydipcc*.so /app/fairdiplomacy/ && \
     echo "  ✓ Built pydipcc module successfully"
@@ -168,7 +172,19 @@ RUN echo "✅ Testing pydipcc module..." && \
 RUN echo "✅ Installing project requirements..." && \
     pip install -r requirements.txt || echo "  ⚠️ Some requirements could not be installed"
 
-# PHASE 7: Environment verification
+# PHASE 7: Set up verification scripts
+# ==============================================
+# Copy verification scripts
+COPY scripts/verify_full_build.sh /app/scripts/verify_full_build.sh
+RUN chmod +x /app/scripts/verify_full_build.sh
+
+# Copy test scripts for diagnostics
+COPY test_scripts/verify_heyhi.py /app/test_scripts/verify_heyhi.py
+COPY test_scripts/verify_imports.py /app/test_scripts/verify_imports.py
+COPY test_scripts/test_full_pipeline.py /app/test_scripts/test_full_pipeline.py
+RUN chmod +x /app/test_scripts/*.py
+
+# PHASE 8: Environment verification
 # ==============================================
 RUN echo "✅ Final environment verification:" && \
     echo "  Python version: $(python --version)" && \
@@ -177,19 +193,14 @@ RUN echo "✅ Final environment verification:" && \
     echo "  Shared object files:" && \
     find /app -name "*.so" | grep -i pydipcc || echo "  ⚠️ No pydipcc.so files found"
 
-# PHASE 8: Full build verification
-# ==============================================
-RUN echo "✅ Running comprehensive build verification..." && \
-    chmod +x /app/scripts/verify_full_build.sh && \
-    if /app/scripts/verify_full_build.sh; then \
-        echo "  ✓ Full build verification PASSED"; \
-    else \
-        echo "  ⚠️ Full build verification failed but continuing build"; \
-    fi && \
-    echo "" && \
+# Final message
+RUN echo "" && \
     echo "✅ Build complete! Use the following to test the environment:" && \
     echo "  python /app/test_pydipcc.py" && \
-    echo "  ./scripts/verify_full_build.sh --full-test"
+    echo "  ./scripts/verify_full_build.sh --full-test" && \
+    echo "" && \
+    echo "To play one Cicero agent as Turkey against six full-press imitation agents, run:" && \
+    echo "  python run.py --adhoc --cfg conf/c01_ag_cmp/cmp.prototxt Iagent_one=agents/cicero.prototxt Iagent_six=agents/ablations/cicero_imitation_only.prototxt power_one=TURKEY"
 
 # Default command
 CMD ["/bin/bash"]

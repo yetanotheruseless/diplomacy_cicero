@@ -8,8 +8,17 @@ import logging
 import os
 from typing import Dict
 import socket
-import torch
-import numpy as np
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    print("Warning: torch not available, limited functionality")
+try:
+    import numpy as np
+except ImportError:
+    np = None
+    print("Warning: numpy not available, limited functionality")
 
 from fairdiplomacy.agents import build_agent_from_cfg
 from fairdiplomacy.agents.base_agent import BaseAgent
@@ -37,8 +46,10 @@ def compare_agents(cfg):
     # NEED TO SET THIS BEFORE CREATING THE AGENT!
     if cfg.seed >= 0:
         logging.info(f"Set seed to {cfg.seed}")
-        torch.manual_seed(cfg.seed)
-        np.random.seed(cfg.seed)
+        if TORCH_AVAILABLE:
+            torch.manual_seed(cfg.seed)
+        if np is not None:
+            np.random.seed(cfg.seed)
 
     agent_one = build_agent_from_cfg(cfg.agent_one)
     agent_six = build_agent_from_cfg(cfg.agent_six)
@@ -64,8 +75,10 @@ def compare_agent_population(cfg):
     # NEED TO SET THIS BEFORE CREATING THE AGENT!
     if cfg.seed >= 0:
         logging.info(f"Set seed to {cfg.seed}")
-        torch.manual_seed(cfg.seed)
-        np.random.seed(cfg.seed)
+        if TORCH_AVAILABLE:
+            torch.manual_seed(cfg.seed)
+        if np is not None:
+            np.random.seed(cfg.seed)
 
     agent_mappings: Dict[str, BaseAgent] = {
         agent.key: build_agent_from_cfg(agent.value) for agent in cfg.agents
@@ -162,4 +175,20 @@ def main(task, cfg, log_level):
 
 
 if __name__ == "__main__":
-    heyhi.parse_args_and_maybe_launch(main)
+    try:
+        heyhi.parse_args_and_maybe_launch(main)
+    except ImportError as e:
+        if "torch" in str(e):
+            print("\nERROR: PyTorch is required to run this script.")
+            print("Please install PyTorch by following instructions at https://pytorch.org/get-started/locally/")
+            print("For Docker users, the PyTorch dependency is included in the Dockerfile.")
+            print("\nError details:", str(e))
+        elif "numpy" in str(e):
+            print("\nERROR: NumPy is required to run this script.")
+            print("Please install NumPy with 'pip install numpy'")
+            print("\nError details:", str(e))
+        else:
+            print(f"\nERROR: Missing dependency - {e}")
+            print("If you're using Docker, try building and running with the provided Docker image.")
+        import sys
+        sys.exit(1)

@@ -5,8 +5,8 @@ services:
       context: .
       dockerfile: Dockerfile.unified
       args:
-        # Can be adjusted based on available memory
-        DIPCC_BUILD_JOBS: 2
+        # Reduced to avoid memory issues
+        DIPCC_BUILD_JOBS: 1
     volumes:
       # Mount your local code to allow for development
       - .:/app
@@ -15,16 +15,22 @@ services:
     # Keep the container running
     stdin_open: true
     tty: true
+    # Allocate more memory to the container
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+        reservations:
+          memory: 4G
     # Environment variables
     environment:
       - PYTHONPATH=/app
   
-  # Lighter version for testing only
+  # Service for running tests
   diplomacy_test:
     build:
       context: .
       dockerfile: Dockerfile.unified
-      target: test
     volumes:
       - .:/app
     # Command to run tests

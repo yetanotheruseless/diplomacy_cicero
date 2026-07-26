@@ -16,7 +16,11 @@ import os
 import pathlib
 import pprint
 
-import torch
+try:
+    import torch
+except ImportError:
+    torch = None
+    print("Warning: torch not available, some functionality will be limited")
 
 from . import checkpoint_repo
 from . import conf
@@ -172,8 +176,15 @@ def maybe_launch(
             ckpt_dir = checkpoint_repo.handle_parser_arg(checkpoint, exp_handle.exp_path)
         util.run_with_config(main, exp_handle, cfg, overrides, ckpt_dir, log_level)
     if exp_handle.is_done():
-        result = torch.load(exp_handle.result_path)
-        if result is not None:
-            simple_result = {k: v for k, v in result.items() if isinstance(v, (int, float, str))}
-            pprint.pprint(simple_result, indent=2)
+        if torch is not None and exp_handle.result_path.exists():
+            try:
+                result = torch.load(exp_handle.result_path)
+                if result is not None:
+                    simple_result = {k: v for k, v in result.items() if isinstance(v, (int, float, str))}
+                    pprint.pprint(simple_result, indent=2)
+            except Exception as e:
+                logging.error(f"Error loading result: {e}")
+                logging.warning("Result file exists but could not be loaded (torch might be missing)")
+        else:
+            logging.warning("Experiment is done but torch is not available or result file doesn't exist")
     return exp_handle
