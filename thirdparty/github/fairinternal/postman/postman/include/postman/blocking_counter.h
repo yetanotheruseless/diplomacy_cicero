@@ -28,11 +28,11 @@ LICENSE file in the root directory of this source tree.
 
 #pragma once
 
-#include <assert.h>
-#include <atomic>
-#include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <mutex>
+#include <stdexcept>
+#include <string>
 
 // BlockingCounter
 //
@@ -69,7 +69,12 @@ LICENSE file in the root directory of this source tree.
 class BlockingCounter {
  public:
   explicit BlockingCounter(int initial_count)
-      : count_(initial_count), num_waiting_(0) {}
+      : count_(initial_count) {
+    if (initial_count < 0) {
+      throw std::invalid_argument(
+          "BlockingCounter initial_count must be non-negative");
+    }
+  }
 
   BlockingCounter(const BlockingCounter&) = delete;
   BlockingCounter& operator=(const BlockingCounter&) = delete;
@@ -82,18 +87,22 @@ class BlockingCounter {
   // Memory ordering: For any threads X and Y, any action taken by X
   // before it calls `DecrementCount()` is visible to thread Y after
   // Y's call to `DecrementCount()`, provided Y's call returns `true`.
-  bool DecrementCount(const uint delta = 1) {
+  bool DecrementCount(const std::uint32_t delta = 1) {
+    bool became_zero;
     {
       std::unique_lock l(count_mutex_);
-      count_ -= delta;
-      if (count_ < 0) {
+      if (delta > static_cast<std::uint32_t>(count_)) {
         throw std::runtime_error(
-            "BlockingCounter::DecrementCount() called too many times.  count=" +
-            std::to_string(count_));
+            "BlockingCounter::DecrementCount() underflow: count=" +
+            std::to_string(count_) + ", delta=" + std::to_string(delta));
       }
+      count_ -= static_cast<int>(delta);
+      became_zero = count_ == 0;
     }
-    count_cond_.notify_all();
-    return count_ == 0;
+    if (became_zero) {
+      count_cond_.notify_all();
+    }
+    return became_zero;
   }
 
   // BlockingCounter::Wait()
@@ -107,26 +116,16 @@ class BlockingCounter {
   // from `Wait()`.
   void Wait() {
     std::unique_lock l(count_mutex_);
-    assert(count_ >= 0 && "BlockingCounter underflow");
-
-    // only one thread may call Wait(). To support more than one thread,
-    // implement a counter num_to_exit, like in the Barrier class.
-    assert(num_waiting_ == 0 && "multiple threads called Wait()");
-    num_waiting_++;
-
-    while (count_ != 0) {
-      count_cond_.wait(l);
+    if (wait_started_) {
+      throw std::logic_error("BlockingCounter::Wait() may only be called once");
     }
-
-    // At this point, We know that all threads executing DecrementCount have
-    // released the lock, and so will not touch this object again.
-    // Therefore, the thread calling this method is free to delete the object
-    // after we return from this method.
+    wait_started_ = true;
+    count_cond_.wait(l, [this]() { return count_ == 0; });
   }
 
  private:
   int count_;
-  int num_waiting_;
+  bool wait_started_ = false;
 
   std::condition_variable count_cond_;
   std::mutex count_mutex_;

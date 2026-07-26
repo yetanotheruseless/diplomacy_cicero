@@ -172,25 +172,30 @@ Those results were valuable feasibility evidence. They do not validate Python
 3.12, Torch 2.13, cu130/CUDA 13.0, or protoc 35.1 and therefore must remain
 labeled historical.
 
-## RELA self-play CPU validation
+## Distributed self-play CPU validation
 
-The optional RELA prioritized-replay extension has a separate reproducible
-Linux/x86-64 CPU gate:
+The RELA prioritized-replay and Postman tensor-RPC extensions share a
+reproducible Linux/x86-64 CPU gate:
 
 ```bash
 modal run modal_selfplay.py
 ```
 
 The image pins Ubuntu 24.04, Python 3.12, GCC 13, PyTorch 2.13.0 CPU,
-pybind11 3.0.4, and protobuf 7.35.1. It runs the canonical C++20 build, the
-standalone CTest target, and the binding-level replay tests both while building
-the image and in the remote function. This gate does not claim Postman RPC or a
-CUDA execution test; see [`docs/selfplay_runtime.md`](docs/selfplay_runtime.md).
+pybind11 3.0.4, and protobuf 7.35.1. It builds RELA plus gRPC 1.83/Postman,
+validates both C++20 CTest targets, verifies Postman's platform wheel from a
+clean target, and runs both binding-level Python suites during image
+construction and again in the remote function. This gate does not claim CUDA
+execution; see [`docs/selfplay_runtime.md`](docs/selfplay_runtime.md).
 
 On 2026-07-26, [Modal run
-`ap-xCrdh9SrR5N68ldb1G4O6d`](https://modal.com/apps/jakemannix/main/ap-xCrdh9SrR5N68ldb1G4O6d)
-passed CTest 1/1 and the Python replay suite 15/15 in both stages on
-Linux/x86-64 with Python 3.12.1, Torch 2.13.0+cpu, and protobuf 7.35.1.
+`ap-hdQ6Bho2Zynt2OKOUtqBVx`](https://modal.com/apps/jakemannix/main/ap-hdQ6Bho2Zynt2OKOUtqBVx)
+passed the complete gate in both stages on Linux/x86-64 with Python 3.12.1,
+Torch 2.13.0+cpu, Python protobuf 7.35.1, source-built protobuf/protoc 35.1,
+and gRPC 1.83.0. Image construction passed RELA CTest 1/1 and Python 15/15,
+then produced a `cp312-cp312-linux_x86_64` Postman wheel with
+`$ORIGIN/../torch/lib`, passed its clean-target import, CTest 1/1, and Python
+15/15. The remote function repeated both CTest/Python gates successfully.
 
 ## Oracle validation
 

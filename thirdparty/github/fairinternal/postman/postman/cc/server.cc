@@ -4,176 +4,278 @@ Copyright (c) Meta Platforms, Inc. and affiliates.
 This source code is licensed under the MIT license found in the
 LICENSE file in the root directory of this source tree.
 */
-/*
- * Copyright (c) Facebook, Inc. and its affiliates.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
 
-#include <chrono>
-#include <deque>
-#include <future>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <stdexcept>
-#include <thread>
-
-#include <ATen/ATen.h>
-
-#include "postman/serialization.h"
 #include "postman/server.h"
 
-#include "postman/blocking_counter.h"
-#include "postman/computationqueue.h"
-#include "postman/exceptions.h"
+#include <chrono>
+#include <cstdint>
+#include <exception>
+#include <future>
+#include <iostream>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
 
+#include <ATen/ATen.h>
 #include <nest.h>
 
-namespace postman {
+#include "postman/computationqueue.h"
+#include "postman/exceptions.h"
+#include "postman/serialization.h"
 
-grpc::Status Server::ServiceImpl::bind(const std::string &name,
-                                       Function &&function) {
-  functions_.insert({name, std::move(function)});
-  return grpc::Status::OK;
+namespace postman {
+namespace {
+
+TensorNest wait_for_outputs(
+    const std::shared_future<TensorNest>& future) {
+  return future.get();
+}
+
+TensorNest select_output(
+    const TensorNest& outputs,
+    std::int64_t index) {
+  return outputs.map([index](const at::Tensor& tensor) {
+    if (!tensor.defined() || tensor.dim() == 0 ||
+        index < 0 || index >= tensor.size(0)) {
+      throw std::runtime_error(
+          "Batched function output is missing the requested batch row");
+    }
+    return tensor[index];
+  });
+}
+
+std::int64_t validate_batched_inputs(
+    const TensorNest& inputs) {
+  const std::vector<at::Tensor> leaves = inputs.flatten();
+  if (leaves.empty()) {
+    throw std::invalid_argument(
+        "Batched RPC requires at least one tensor input");
+  }
+  if (!leaves.front().defined() ||
+      leaves.front().dim() == 0) {
+    throw std::invalid_argument(
+        "Batched RPC inputs must have a leading batch dimension");
+  }
+
+  const std::int64_t batch_size = leaves.front().size(0);
+  if (batch_size <= 0) {
+    throw std::invalid_argument(
+        "Batched RPC batch dimension must be greater than zero");
+  }
+  for (const at::Tensor& tensor : leaves) {
+    if (!tensor.defined() || tensor.dim() == 0 ||
+        tensor.size(0) != batch_size) {
+      throw std::invalid_argument(
+          "All batched RPC inputs must have the same leading dimension");
+    }
+  }
+  return batch_size;
+}
+
+}  // namespace
+
+void Server::ServiceImpl::bind(
+    std::string name,
+    Function function) {
+  if (name.empty()) {
+    throw std::invalid_argument(
+        "RPC function name must not be empty");
+  }
+  if (!function) {
+    throw std::invalid_argument(
+        "RPC function must not be empty");
+  }
+  const auto [unused, inserted] =
+      functions_.emplace(std::move(name), std::move(function));
+  (void)unused;
+  if (!inserted) {
+    throw std::invalid_argument(
+        "An RPC function with that name is already bound");
+  }
 }
 
 grpc::Status Server::ServiceImpl::Call(
-    grpc::ServerContext *context,
-    grpc::ServerReaderWriter<CallResponse, CallRequest> *stream) {
-  CallRequest call_req;
-
-  while (stream->Read(&call_req)) {
-    CallResponse call_resp;
+    grpc::ServerContext* context,
+    grpc::ServerReaderWriter<
+        CallResponse, CallRequest>* stream) {
+  CallRequest request;
+  while (stream->Read(&request)) {
+    CallResponse response;
     try {
-      auto it = functions_.find(call_req.function());
-      if (it == functions_.end())
-        throw std::runtime_error("AttributeError: No such function '" +
-                                 call_req.function() + "'");
-      TensorNest result = it->second(
-          detail::nest_proto_to_tensornest(call_req.mutable_inputs()));
-      detail::fill_proto_from_tensornest(call_resp.mutable_outputs(), result);
-    } catch (const QueueClosed &e) {
+      if (!request.has_function() ||
+          request.function().empty()) {
+        throw std::invalid_argument(
+            "RPC request is missing a function name");
+      }
+      if (!request.has_inputs()) {
+        throw std::invalid_argument(
+            "RPC request is missing inputs");
+      }
+
+      const auto function = functions_.find(request.function());
+      if (function == functions_.end()) {
+        throw std::runtime_error(
+            "AttributeError: No such function '" +
+            request.function() + "'");
+      }
+      const TensorNest result = function->second(
+          detail::nest_proto_to_tensornest(request.inputs()));
+      detail::fill_proto_from_tensornest(
+          response.mutable_outputs(), result);
+    } catch (const QueueClosed&) {
       break;
-    } catch (const std::runtime_error &e) {
-      std::cerr << "Error in " << call_req.function() << ": " << e.what()
-                << std::endl;
-      call_resp.mutable_error()->set_message(e.what());
-    } catch (const std::exception &e) {
-      std::cerr << "Error in " << call_req.function() << ": " << e.what()
-                << std::endl;
-      return grpc::Status(grpc::INTERNAL, e.what());
+    } catch (const std::exception& error) {
+      std::cerr << "Error in " << request.function() << ": "
+                << error.what() << '\n';
+      response.mutable_error()->set_message(error.what());
+    } catch (...) {
+      return grpc::Status(
+          grpc::StatusCode::INTERNAL,
+          "RPC function raised a non-standard exception");
     }
-    stream->Write(call_resp);
+
+    if (!stream->Write(response)) {
+      if (context->IsCancelled()) {
+        return grpc::Status(
+            grpc::StatusCode::CANCELLED,
+            "Client cancelled the RPC stream");
+      }
+      return grpc::Status(
+          grpc::StatusCode::UNAVAILABLE,
+          "Unable to write the RPC response");
+    }
+    request.Clear();
   }
 
   return grpc::Status::OK;
 }
 
-void Server::run() {
-  if (server_) throw std::runtime_error("Server already running");
+Server::~Server() {
+  stop();
+}
 
-  int port;
+void Server::run() {
+  std::scoped_lock lock(state_mutex_);
+  if (started_) {
+    throw std::logic_error(
+        "Server instances may only be run once");
+  }
 
   grpc::ServerBuilder builder;
-  builder.SetMaxReceiveMessageSize(-1);  // Unlimited.
+  builder.SetMaxReceiveMessageSize(kMaxMessageBytes);
+  builder.SetMaxSendMessageSize(kMaxMessageBytes);
   builder.AddChannelArgument(GRPC_ARG_ALLOW_REUSEPORT, 0);
-  builder.AddListeningPort(address_, grpc::InsecureServerCredentials(), &port);
+
+  int selected_port = 0;
+  builder.AddListeningPort(
+      address_,
+      grpc::InsecureServerCredentials(),
+      &selected_port);
   builder.RegisterService(&service_);
-  server_ = builder.BuildAndStart();
 
-  if (!server_)
+  std::unique_ptr<grpc::Server> server =
+      builder.BuildAndStart();
+  if (!server || selected_port == 0) {
     throw std::runtime_error(
-        "Failed to run server. Maybe the port is already used?");
+        "Failed to start Postman server at " + address_ +
+        "; the address may already be in use");
+  }
 
-  if (port == 0) throw std::runtime_error("Failed to bind to port");
-
-  port_.store(port);
+  server_ = std::move(server);
+  started_ = true;
+  port_.store(selected_port);
   running_.store(true);
 }
 
 void Server::wait() {
-  if (!server_) throw std::runtime_error("Server not running");
-
-  server_->Wait();
+  grpc::Server* server;
+  {
+    std::scoped_lock lock(state_mutex_);
+    if (!server_) {
+      throw std::logic_error("Server has not been run");
+    }
+    server = server_.get();
+  }
+  server->Wait();
 }
 
-void Server::stop() {
-  if (!server_) throw std::runtime_error("Server not running");
-
-  running_.store(false);
-  server_->Shutdown(std::chrono::system_clock::now());
+void Server::stop() noexcept {
+  grpc::Server* server;
+  {
+    std::scoped_lock lock(state_mutex_);
+    if (!server_ || !running_.exchange(false)) {
+      return;
+    }
+    server = server_.get();
+  }
+  server->Shutdown(std::chrono::system_clock::now());
 }
 
-void Server::bind(const std::string &name, Function &&function) {
-  service_.bind(name, std::move(function));
+void Server::bind(std::string name, Function function) {
+  std::scoped_lock lock(state_mutex_);
+  if (started_) {
+    throw std::logic_error(
+        "RPC functions must be bound before Server.run()");
+  }
+  service_.bind(std::move(name), std::move(function));
 }
 
-void Server::bind_queue(const std::string &name,
-                        std::shared_ptr<ComputationQueue> queue) {
-  bind(name, [queue(queue)](const TensorNest &inputs) mutable {
-    int64_t index;
-    auto future = queue->compute(inputs, &index);
-
-    if (future.wait_for(std::chrono::seconds(5)) != std::future_status::ready)
-      throw TimeoutError("Compute timeout reached.");
-
-    TensorNest outputs = [&]() {
-      try {
-        return future.get();
-      } catch (const std::future_error &e) {
-        if (queue->closed() && e.code() == std::future_errc::broken_promise)
-          throw QueueClosed(e.what());
-        throw;
-      }
-    }();
-
-    return outputs.map([index](const at::Tensor &t) { return t[index]; });
+void Server::bind_queue(
+    const std::string& name,
+    std::shared_ptr<ComputationQueue> queue) {
+  if (!queue) {
+    throw std::invalid_argument(
+        "bind_queue requires a computation queue");
+  }
+  bind(name, [queue = std::move(queue)](
+                 const TensorNest& inputs) {
+    std::int64_t index;
+    const auto future = queue->compute(inputs, &index);
+    return select_output(wait_for_outputs(future), index);
   });
 }
 
-void Server::bind_queue_batched(const std::string &name,
-                                std::shared_ptr<ComputationQueue> queue) {
-  bind(name, [queue(queue)](const TensorNest &inputs) mutable {
-    // TODO: Add some shape testing.
-    int64_t batch_size = inputs.front().size(0);
+void Server::bind_queue_batched(
+    const std::string& name,
+    std::shared_ptr<ComputationQueue> queue) {
+  if (!queue) {
+    throw std::invalid_argument(
+        "bind_queue_batched requires a computation queue");
+  }
+  bind(name, [queue = std::move(queue)](
+                 const TensorNest& inputs) {
+    const std::int64_t batch_size =
+        validate_batched_inputs(inputs);
 
-    std::vector<int64_t> indices(batch_size);
+    std::vector<std::int64_t> indices(
+        static_cast<std::size_t>(batch_size));
     std::vector<std::shared_future<TensorNest>> futures;
-
-    for (int64_t i = 0; i < batch_size; ++i) {
+    futures.reserve(static_cast<std::size_t>(batch_size));
+    for (std::int64_t row = 0; row < batch_size; ++row) {
       futures.push_back(queue->compute(
-          inputs.map([i](const at::Tensor &t) { return t[i]; }), &indices[i]));
+          inputs.map([row](const at::Tensor& tensor) {
+            return tensor[row];
+          }),
+          &indices[static_cast<std::size_t>(row)]));
     }
 
     std::vector<TensorNest> outputs;
-
-    for (int64_t i = 0; i < batch_size; ++i) {
-      try {
-        outputs.push_back(futures[i].get().map(
-            [index(indices[i])](const at::Tensor &t) { return t[index]; }));
-      } catch (const std::future_error &e) {
-        if (queue->closed() && e.code() == std::future_errc::broken_promise)
-          throw QueueClosed(e.what());
-        throw;
-      }
+    outputs.reserve(static_cast<std::size_t>(batch_size));
+    for (std::int64_t row = 0; row < batch_size; ++row) {
+      outputs.emplace_back(select_output(
+          wait_for_outputs(
+              futures[static_cast<std::size_t>(row)]),
+          indices[static_cast<std::size_t>(row)]));
     }
 
-    // TODO: This incurs extra memcopies. We could also write everything to a
-    // buffer here and give that to the protobuf library directly.
-    nest::Nest<std::vector<at::Tensor>> zipped = TensorNest::zip(outputs);
+    nest::Nest<std::vector<at::Tensor>> zipped =
+        TensorNest::zip(outputs);
     return zipped.map(
-        [](const std::vector<at::Tensor> &v) { return at::stack(v); });
+        [](const std::vector<at::Tensor>& tensors) {
+          return at::stack(tensors);
+        });
   });
 }
 

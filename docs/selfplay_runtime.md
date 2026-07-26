@@ -9,9 +9,10 @@ dependencies. Distributed RL training adds two separate native pieces:
 ## RELA: canonical build and test
 
 RELA now builds directly from the active Python environment. It no longer
-depends on Postman's empty `grpc` and `pybind11` submodules, and it does not set
-GPU architecture flags. PyTorch's CMake package supplies the correct CPU or
-CUDA libraries and C++ ABI for the wheel installed in the environment.
+depends on Postman's removed vendored `grpc` and `pybind11` gitlinks, and it
+does not set GPU architecture flags. PyTorch's CMake package supplies the
+correct CPU or CUDA libraries and C++ ABI for the wheel installed in the
+environment.
 
 Requirements:
 
@@ -21,6 +22,13 @@ Requirements:
 - CMake 3.28 or newer
 - Ninja and a C++20 compiler
 - pytest for the Python binding tests
+
+The broader distributed-training integration tests additionally require the
+`training` extra:
+
+```bash
+python -m pip install -e ".[training]"
+```
 
 From the repository root, the canonical command is:
 
@@ -53,58 +61,69 @@ N_SELFPLAY_JOBS=8 \
 ./scripts/build_selfplay.sh
 ```
 
-`make selfplay` builds RELA only, and `make test_selfplay_rela` runs its focused
-native tests. `make test_selfplay` also runs the broader self-play Python
-integration tests and therefore requires Postman RPC.
+`make selfplay` builds RELA only, `make postman` builds Postman only, and the
+corresponding `make test_selfplay_rela` and `make test_postman` targets run their
+focused gates. `make test_selfplay` builds both extensions and then runs the
+broader rollout/model-server integration tests.
 
-## Postman RPC: separate opt-in dependency
+## Postman RPC: canonical tensor transport
 
-RELA does not use Postman. The rollout and model-server modules do, but the
-checked-in Postman repository still points at 2019-era gRPC and pybind11
-gitlinks that are not initialized by default. Those pins do not represent the
-canonical protobuf 7.35/protoc 35 runtime and are not silently downloaded or
-labeled supported by the RELA build.
+RELA does not use Postman, but distributed rollout and model-server processes
+do. Postman now builds on the same Python 3.12, PyTorch 2.13, pybind11 3, and
+C++20 contract as the rest of Cicero. Its native dependency line is gRPC 1.83.0
+at commit `c876f4da50f7da2f331888b88b2a7243514139fe` and protobuf/protoc
+35.1 at commit `35cd01f9fe9afbeea38cc7b979a3b6bfcde82c03`.
 
-Until Postman is moved to a current, explicitly pinned gRPC/protobuf toolchain,
-installing it remains a separate opt-in step. A missing `postman` import in the
-broader integration tests means the RPC dependency is absent; it does not
-invalidate the independently built and tested RELA replay buffer.
-
-The checked-in Postman state has been probed rather than assumed. With its two
-gitlinks uninitialized:
-
-```text
--cce8017... thirdparty/github/fairinternal/postman/third_party/grpc
--a1b71df... thirdparty/github/fairinternal/postman/third_party/pybind11
-```
-
-this configuration command:
+The obsolete gRPC 1.20 and pybind11 gitlinks were removed. The canonical helper
+clones the exact gRPC release into an ignored out-of-tree cache, initializes
+only its pinned build dependencies, rejects dirty or mismatched caches, and
+uses scikit-build-core to produce a native platform wheel:
 
 ```bash
-cmake --fresh \
-  -S thirdparty/github/fairinternal/postman/postman \
-  -B /tmp/cicero-postman-probe \
-  -DPYTHON_EXECUTABLE=/path/to/python3.12 \
-  -DCMAKE_BUILD_TYPE=Release
+./scripts/build_postman.sh
 ```
 
-fails because both dependency directories lack `CMakeLists.txt` and therefore
-`pybind11_add_module` is unavailable. Before failing, the legacy CMake also
-demonstrates why it is not a modern build: `FindPythonInterp` selects the
-requested Python 3.12 executable while `FindPythonLibs` can independently select
-a Python 3.13 library, and its bare `python` Torch probe can select a different
-environment. Postman's own CMake additionally fixes C++17, a PyTorch-1.5-era
-`libtorch_python.so` path, and CUDA architectures 6.0/7.0. Consequently this
-branch does not claim that Postman RPC works on the canonical runtime.
+The focused gate builds the C++20 RPC core and every public header with warnings
+as errors, generates the wire code with gRPC's source-built protoc 35.1, runs
+CTest, builds and installs the platform wheel, verifies its relative Torch
+RPATH and a clean-target import, and runs the real extension-backed Python
+lifecycle/concurrency suite.
 
-CUDA builds should select architectures at deployment time through the normal
-CMake/PyTorch controls. This repository intentionally does not restore the
-legacy Pascal/Volta-only `TORCH_CUDA_ARCH_LIST=6.0;7.0` setting.
+The interpreter and caches can be selected explicitly:
 
-The focused suite is validated on macOS/arm64 and Ubuntu 24.04/x86_64 CPU. The
-CUDA 13 wheel follows the same Torch-provided CMake ABI and intentionally has
-no repository-wide architecture list, but this focused harness does not claim a
-GPU execution test.
+```bash
+CICERO_POSTMAN_PYTHON=/path/to/python3.12 \
+CICERO_POSTMAN_BUILD_DIR=/tmp/cicero-postman-build \
+CICERO_POSTMAN_DEPS_DIR=/tmp/cicero-postman-deps \
+N_POSTMAN_JOBS=8 \
+./scripts/build_postman.sh
+```
+
+The helper is the supported source-build frontend. It deliberately disables
+PEP 517 build isolation after verifying the exact active PyTorch wheel so a
+CPU or cu130 build cannot silently resolve a different Torch flavor.
+
+`ComputationQueue` admits at most 64 pending batches by default and rejects
+overflow instead of retaining an unbounded tensor backlog. The limit is
+configurable with `max_pending_batches`. `AsyncClient` similarly bounds active
+and queued calls, while `close()` rejects queued calls and cancels active
+contexts. A custom `max_concurrent_calls` must be at least the batch size of a
+server function that uses `wait_till_full=True`.
+
+Postman's transport serializes tensors through CPU memory. GPU model servers
+receive CPU inputs and explicitly move them to the selected CUDA device before
+inference. No Pascal/Volta architecture list is embedded; CUDA builds inherit
+the architecture policy of the installed PyTorch wheel and deployment.
+
+The obsolete Postman-local replay buffer was removed. Cicero has one supported
+replay implementation: `fairdiplomacy.selfplay.rela`.
+
+The focused suite is validated on macOS/arm64 with a macOS 14.0 wheel deployment
+target and on Ubuntu 24.04/x86_64 CPU. The Docker `cuda-build` stage also builds
+and tests the extension against
+`torch==2.13.0+cu130`, and the runtime stage imports that exact wheel. This is
+an ABI/build gate rather than a Postman GPU-execution claim because the wire
+transport is CPU-based.
 
 The reproducible Linux CPU validation is:
 
@@ -113,5 +132,6 @@ modal run modal_selfplay.py
 ```
 
 That image pins Ubuntu 24.04, Python 3.12, GCC 13, PyTorch 2.13.0 CPU,
-pybind11 3.0.4, and protobuf 7.35.1, then runs the same canonical build and test
-command during image construction and again in the remote function.
+pybind11 3.0.4, and protobuf 7.35.1. It builds and tests both RELA and Postman
+during image construction, then repeats both focused test gates in the remote
+function.

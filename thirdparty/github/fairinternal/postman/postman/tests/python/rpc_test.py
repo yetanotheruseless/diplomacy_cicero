@@ -4,182 +4,356 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 #
-import collections
-import unittest
-import multiprocessing as mp
+from __future__ import annotations
 
-import numpy as np
+import queue
+import socket
+import threading
+import time
+from collections import defaultdict
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, wait
+from typing import Any
 
+import pytest
 import torch
 
 import postman
 
+RPC_TIMEOUT_SECONDS = 15
 
-class RPCTest(unittest.TestCase):
-    def test_rpc_python(self, num_clients=2, address="127.0.0.1:12346"):
-        def run_client():
-            client = postman.Client(address)
-            client.connect(10)
-            client.py_function(
-                torch.zeros((1, 2)), torch.arange(10), (torch.empty(2, 3), torch.ones((1, 2))),
-            )
-            client.batched_function(torch.zeros((1, 2)))
 
-        client_processes = [mp.Process(target=run_client) for _ in range(num_clients)]
+def _call_with_timeout(
+    function: Callable[[], Any],
+    timeout: float = RPC_TIMEOUT_SECONDS,
+) -> Any:
+    outcomes: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
 
-        calls = collections.defaultdict(int)
+    def invoke() -> None:
+        try:
+            outcomes.put((True, function()))
+        except Exception as error:  # noqa: BLE001 - forward failures to the test thread.
+            outcomes.put((False, error))
 
-        def py_function(a, b, c):
-            calls["py_function"] += 1
-            np.testing.assert_array_equal(a.numpy(), np.zeros((1, 1, 2)))
-            np.testing.assert_array_equal(b.numpy(), np.arange(10).reshape((1, 10)))
+    thread = threading.Thread(target=invoke, name="postman-test-call", daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        raise TimeoutError(f"Postman operation did not finish within {timeout} seconds")
 
-            c0, c1 = c
-            self.assertSequenceEqual(list(c0.shape), (1, 2, 3))
-            np.testing.assert_array_equal(c1.numpy(), np.ones((1, 1, 2)))
+    succeeded, outcome = outcomes.get_nowait()
+    if succeeded:
+        return outcome
+    raise outcome
 
-            return torch.ones(1, 1)
 
-        def batched_function(a):
-            calls["batched_function"] += 1
-            self.assertEqual(a.shape[0], 2)
-            return torch.ones(a.shape)
+def _address(server: postman.Server) -> str:
+    return f"127.0.0.1:{server.port()}"
 
-        server = postman.Server(address)
-        server.bind("py_function", py_function, batch_size=1)
-        server.bind(
-            "batched_function", batched_function, batch_size=num_clients, wait_till_full=True,
+
+def _stop_and_wait(server: postman.Server) -> None:
+    server.stop()
+    _call_with_timeout(server.wait)
+
+
+def _connected_client(server: postman.Server) -> postman.Client:
+    client = postman.Client(_address(server))
+    client.connect(RPC_TIMEOUT_SECONDS)
+    return client
+
+
+def _unused_local_address() -> str:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        return f"127.0.0.1:{listener.getsockname()[1]}"
+
+
+def test_python_rpc_batches_concurrent_clients() -> None:
+    num_clients = 4
+    calls: defaultdict[str, int] = defaultdict(int)
+
+    def python_function(
+        tensor: torch.Tensor,
+        sequence: torch.Tensor,
+        nested: tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        calls["python_function"] += 1
+        assert tensor.shape == (1, 1, 2)
+        assert sequence.shape == (1, 10)
+        assert nested[0].shape == (1, 2, 3)
+        assert nested[1].shape == (1, 1, 2)
+        return tensor + 3
+
+    def batched_function(tensor: torch.Tensor) -> torch.Tensor:
+        calls["batched_function"] += 1
+        assert tensor.shape == (num_clients, 1, 2)
+        return tensor + 5
+
+    server = postman.Server("127.0.0.1:0")
+    server.bind("python_function", python_function, batch_size=1)
+    server.bind(
+        "batched_function",
+        batched_function,
+        batch_size=num_clients,
+        wait_till_full=True,
+    )
+    server.run()
+
+    start = threading.Barrier(num_clients)
+
+    def run_client() -> tuple[torch.Tensor, torch.Tensor]:
+        client = _connected_client(server)
+        start.wait(RPC_TIMEOUT_SECONDS)
+        direct = client.python_function(
+            torch.zeros((1, 2)),
+            torch.arange(10),
+            (torch.empty(2, 3), torch.ones((1, 2))),
         )
+        batched = client.batched_function(torch.zeros((1, 2)))
+        return direct, batched
+
+    executor = ThreadPoolExecutor(max_workers=num_clients, thread_name_prefix="postman-client")
+    futures = [executor.submit(run_client) for _ in range(num_clients)]
+    try:
+        done, not_done = wait(futures, timeout=RPC_TIMEOUT_SECONDS)
+        assert not not_done, "concurrent RPC clients timed out"
+        assert len(done) == num_clients
+        for future in futures:
+            direct, batched = future.result()
+            torch.testing.assert_close(direct, torch.full((1, 2), 3.0))
+            torch.testing.assert_close(batched, torch.full((1, 2), 5.0))
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+        _stop_and_wait(server)
+
+    assert calls["python_function"] == num_clients
+    assert calls["batched_function"] == 1
+
+
+def test_none_return_is_an_empty_tuple() -> None:
+    def get_tensor() -> torch.Tensor:
+        return torch.arange(2).reshape(1, 2)
+
+    def return_none(_tensor: torch.Tensor) -> None:
+        return None
+
+    def implicit_none() -> None:
+        return None
+
+    server = postman.Server("127.0.0.1:0")
+    server.bind("get_tensor", get_tensor, batch_size=1)
+    server.bind("return_none", return_none, batch_size=1)
+    server.bind("implicit_none", implicit_none, batch_size=1)
+    server.run()
+    try:
+        client = _connected_client(server)
+        torch.testing.assert_close(client.get_tensor(), torch.arange(2))
+        assert client.return_none(torch.tensor(10)) == ()
+        assert client.implicit_none() == ()
+    finally:
+        _stop_and_wait(server)
+
+
+def test_server_lifecycle_is_one_shot_and_cleanup_is_idempotent() -> None:
+    server = postman.Server("127.0.0.1:0")
+    server.bind("identity", lambda tensor: tensor, batch_size=1, num_threads=2)
+    server.run()
+
+    assert server.port() > 0
+    assert server.running()
+    assert len(server.threads) == 2
+    assert all(thread.is_alive() for thread in server.threads)
+
+    with pytest.raises(RuntimeError, match="after the server has started"):
+        server.bind("late", lambda tensor: tensor, batch_size=1)
+    with pytest.raises(RuntimeError, match="only be called once"):
         server.run()
 
-        for p in client_processes:
-            p.start()
+    server.stop()
+    server.stop()
+    _call_with_timeout(server.wait)
+    _call_with_timeout(server.wait)
 
-        for p in client_processes:
-            p.join()
+    assert not server.running()
+    assert all(not thread.is_alive() for thread in server.threads)
 
-        server.stop()
 
-        self.assertEqual(calls["py_function"], num_clients)
-        self.assertEqual(calls["batched_function"], 1)
+def test_server_rejects_invalid_worker_configuration() -> None:
+    server = postman.Server("127.0.0.1:0")
 
-    @unittest.skip("disabled until jit is re-added")
-    def test_rpc_jit(self, num_clients=2, address="127.0.0.1:12346"):
-        def run_client(client_id):
-            client = postman.Client(address)
-            client.connect(10)
-            arg = np.full((1, 2), client_id, dtype=np.float32)
-            batched_arg = np.full((2,), client_id, dtype=np.float32)
+    with pytest.raises(TypeError, match="callable"):
+        server.bind("invalid", object(), batch_size=1)
+    for num_threads in (0, -1, True, 1.5):
+        with pytest.raises(ValueError, match="positive integer"):
+            server.bind(
+                f"invalid_threads_{num_threads}",
+                lambda tensor: tensor,
+                batch_size=1,
+                num_threads=num_threads,
+            )
 
-            function_result = client.function(arg)
-            batched_function_result = client.batched_function(batched_arg)
+    # Stopping a server that was never started is a safe no-op.
+    server.stop()
+    server.stop()
+    with pytest.raises(RuntimeError, match="has not been run"):
+        server.wait()
 
-            np.testing.assert_array_equal(function_result, np.full((1, 2), client_id))
-            np.testing.assert_array_equal(batched_function_result, np.full((2,), client_id))
 
-        clients = [mp.Process(target=run_client, args=(i,)) for i in range(num_clients)]
+def test_remote_function_error_does_not_kill_worker() -> None:
+    def validate(tensor: torch.Tensor) -> torch.Tensor:
+        if torch.any(tensor < 0):
+            raise ValueError("negative values are not accepted")
+        return tensor + 1
 
-        linear = torch.nn.Linear(2, 2, bias=False)
-        linear.weight.data = torch.diagflat(torch.ones(2))
-        module = torch.jit.script(linear)
-        server = postman.Server("127.0.0.1:12346")
+    server = postman.Server("127.0.0.1:0")
+    server.bind("validate", validate, batch_size=1)
+    server.run()
+    try:
+        client = _connected_client(server)
+        with pytest.raises(ValueError, match="negative values are not accepted"):
+            client.validate(torch.tensor(-1))
+        torch.testing.assert_close(client.validate(torch.tensor(2)), torch.tensor(3))
+        assert server.threads[0].is_alive()
+    finally:
+        _stop_and_wait(server)
 
-        server.bind("function", module)
-        server.bind("batched_function", module, batch_size=num_clients)
 
-        server.run()
+def test_bind_queue_batched_supports_runtime_batch_size_changes() -> None:
+    initial_batch_size = 3
+    final_batch_size = 2
+    computation_queue = postman.ComputationQueue(batch_size=initial_batch_size)
+    server = postman.Server("127.0.0.1:0")
+    server.bind_queue_batched("identity", computation_queue)
+    server.run()
 
-        for p in clients:
-            p.start()
+    outcomes: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
 
-        for p in clients:
-            p.join()
-
-        server.stop()
-
-    # TODO(heiner): Add more tests: return values, etc.
-
-    def test_none_return(self):
-        def get_nothing():
-            # TODO(heiner): Add check on return shape.
-            return torch.arange(2).reshape(1, 2)
-
-        def return_nothing(t):
-            return None
-
-        def nothing():
-            return
-
-        server = postman.Server("127.0.0.1:0")
-        server.bind("get_nothing", get_nothing, batch_size=1)
-        server.bind("return_nothing", return_nothing, batch_size=1)
-        server.bind("nothing", nothing, batch_size=1)
-        server.run()
-
-        client = postman.Client("127.0.0.1:%i" % server.port())
-        client.connect(10)
+    def run_client() -> None:
         try:
-            value = client.get_nothing()
-            np.testing.assert_array_equal(value, np.arange(2))
-            value = client.return_nothing(torch.tensor(10))
+            client = _connected_client(server)
+            first = client.identity(torch.arange(initial_batch_size * 2).reshape(-1, 2))
+            second = client.identity(torch.arange(final_batch_size * 2).reshape(-1, 2))
+            outcomes.put((True, (first, second)))
+        except Exception as error:  # noqa: BLE001 - forward failures to the test thread.
+            outcomes.put((False, error))
 
-            # For now, "None" responses are empty tuples.
-            self.assertEqual(value, ())
-            self.assertEqual(client.nothing(), ())
+    client_thread = threading.Thread(target=run_client, name="postman-batched-client", daemon=True)
+    client_thread.start()
 
-        finally:
-            server.stop()
+    try:
+        with computation_queue.get(wait_till_full=True) as computation:
+            inputs = computation.get_inputs()[0]
+            computation.set_outputs(inputs)
 
-    def test_bind_port_zero(self):
-        server = postman.Server("127.0.0.1:0")
-        server.run()
+        computation_queue.set_batch_size(final_batch_size)
+
+        with computation_queue.get(wait_till_full=True) as computation:
+            inputs = computation.get_inputs()[0]
+            computation.set_outputs(inputs)
+
+        client_thread.join(RPC_TIMEOUT_SECONDS)
+        assert not client_thread.is_alive(), "batched RPC client timed out"
+        succeeded, outcome = outcomes.get_nowait()
+        if not succeeded:
+            raise outcome
+
+        first, second = outcome
+        torch.testing.assert_close(
+            first,
+            torch.arange(initial_batch_size * 2).reshape(-1, 2),
+        )
+        torch.testing.assert_close(
+            second,
+            torch.arange(final_batch_size * 2).reshape(-1, 2),
+        )
+    finally:
+        computation_queue.close()
+        _stop_and_wait(server)
+
+
+@pytest.mark.parametrize("client_kind", ["sync", "async"])
+def test_connect_releases_gil_while_waiting_for_server(client_kind: str) -> None:
+    address = _unused_local_address()
+    server = postman.Server(address)
+    delayed_start_ready = threading.Event()
+    startup_outcomes: queue.Queue[Exception | None] = queue.Queue(maxsize=1)
+
+    def start_server_later() -> None:
+        delayed_start_ready.set()
+        time.sleep(0.1)
         try:
-            # ephemeral port should be assigned
-            self.assertNotEqual(server.port(), 0)
-        finally:
-            server.stop()
-
-    def test_bind_unix_domain_socket(self):
-        server = postman.Server("unix:/tmp/test.sock")
-        server.run()
-        try:
-            self.assertNotEqual(server.port(), 0)
-        finally:
-            server.stop()
-
-    def test_set_batch_size(self):
-        address = "127.0.0.1"
-
-        init_batch_size = 3
-        final_batch_size = 2
-
-        def run_client(port):
-            client = postman.Client("%s:%i" % (address, port))
-            client.connect(10)
-            client.foo(torch.Tensor(init_batch_size, 2, 2))
-            client.foo(torch.Tensor(final_batch_size, 2, 2))
-
-        try:
-            server = postman.Server("%s:0" % address)
-            q = postman.ComputationQueue(batch_size=init_batch_size)
-            server.bind_queue_batched("foo", q)
             server.run()
+            startup_outcomes.put(None)
+        except Exception as error:  # noqa: BLE001 - forward failures to the test thread.
+            startup_outcomes.put(error)
 
-            client_proc = mp.Process(target=run_client, args=(server.port(),))
-            client_proc.start()
+    startup_thread = threading.Thread(
+        target=start_server_later,
+        name=f"postman-delayed-{client_kind}-server",
+        daemon=True,
+    )
+    startup_thread.start()
+    assert delayed_start_ready.wait(RPC_TIMEOUT_SECONDS)
 
-            with q.get(wait_till_full=True) as batch:
-                batch.set_outputs(batch.get_inputs()[0])
+    streams: Any | None = None
+    client: Any
+    try:
+        if client_kind == "sync":
+            client = postman.Client(address)
+            client.connect(3)
+        else:
+            client = postman.AsyncClient(address)
+            streams = client.connect(3)
 
-            q.set_batch_size(final_batch_size)
+        startup_thread.join(RPC_TIMEOUT_SECONDS)
+        assert not startup_thread.is_alive(), "delayed server startup timed out"
+        startup_error = startup_outcomes.get_nowait()
+        if startup_error is not None:
+            raise startup_error
+    finally:
+        startup_thread.join(RPC_TIMEOUT_SECONDS)
+        if streams is not None:
+            _call_with_timeout(streams.close)
+        if client_kind == "sync" and "client" in locals():
+            _call_with_timeout(client.close)
+        if server.running():
+            _stop_and_wait(server)
 
-            with q.get(wait_till_full=True) as batch:
-                batch.set_outputs(batch.get_inputs()[0])
-        finally:
-            q.close()
-            server.stop()
-            client_proc.join()
 
+def test_computation_queue_rpc_can_wait_longer_than_five_seconds() -> None:
+    computation_queue = postman.ComputationQueue(batch_size=1, max_pending_batches=2)
+    server = postman.Server("127.0.0.1:0")
+    server.bind_queue("identity", computation_queue)
+    server.run()
+    client = _connected_client(server)
+    outcomes: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
 
-if __name__ == "__main__":
-    unittest.main()
+    def run_client() -> None:
+        try:
+            outcomes.put((True, client.identity(torch.tensor(7))))
+        except Exception as error:  # noqa: BLE001 - forward failures to the test thread.
+            outcomes.put((False, error))
+
+    client_thread = threading.Thread(
+        target=run_client,
+        name="postman-slow-computation-client",
+        daemon=True,
+    )
+    client_thread.start()
+
+    try:
+        with computation_queue.get(wait_till_full=True) as computation:
+            inputs = computation.get_inputs()[0]
+            time.sleep(5.25)
+            computation.set_outputs(inputs)
+
+        client_thread.join(RPC_TIMEOUT_SECONDS)
+        assert not client_thread.is_alive(), "slow queued RPC timed out"
+        succeeded, outcome = outcomes.get_nowait()
+        if not succeeded:
+            raise outcome
+        torch.testing.assert_close(outcome, torch.tensor(7))
+    finally:
+        computation_queue.close()
+        _call_with_timeout(client.close)
+        _stop_and_wait(server)

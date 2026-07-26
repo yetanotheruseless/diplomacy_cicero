@@ -8,9 +8,14 @@ LICENSE file in the root directory of this source tree.
 
 #include <algorithm>
 #include <deque>
+#include <functional>
+#include <iterator>
 #include <map>
 #include <memory>
+#include <stdexcept>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -94,7 +99,7 @@ struct Nest {
 
   bool empty() const {
     return std::visit(
-        overloaded{[](const T &t) { return false; },
+        overloaded{[](const T &) { return false; },
                    [](const std::vector<Nest> &v) {
                      return std::all_of(v.begin(), v.end(),
                                         [](auto &n) { return n.empty(); });
@@ -197,7 +202,7 @@ struct Nest {
       throw std::invalid_argument("Expected at least one nest.");
     }
     Nest<std::vector<T>> expanded =
-        nests.begin()->map([nests_size](const T &t) {
+        nests.begin()->map([nests_size](const T &) {
           std::vector<T> leaf;
           leaf.reserve(nests_size);
           return leaf;
@@ -255,7 +260,7 @@ struct Nest {
               }
               return Nest<S>(result);
             },
-            [](auto &&arg1, auto &&arg2) -> Nest<S> {
+            [](auto &&, auto &&) -> Nest<S> {
               throw std::invalid_argument("nests don't match");
             }},
         nest1.value, nest2.value);
@@ -316,7 +321,7 @@ struct Nest {
                 for_each(f, (*it1).second, (*it2).second);
               }
             },
-            [](auto &&arg1, auto &&arg2) {
+            [](auto &&, auto &&) {
               throw std::invalid_argument("nests don't match");
             }},
         nest1.value, nest2.value);

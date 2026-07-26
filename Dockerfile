@@ -118,15 +118,31 @@ RUN make protos \
     && PYDIPCC_OUT_DIR=/app/fairdiplomacy N_DIPCC_JOBS=4 make dipcc
 
 RUN ./scripts/install_parlai.sh \
+    && ./scripts/build_postman.sh \
     && python - <<'PY'
+import postman
 import torch
+from postman import rpc
 
 assert torch.__version__.split("+", 1)[0] == "2.13.0", torch.__version__
 assert torch.version.cuda == "13.0", torch.version.cuda
-print("CUDA build Torch:", torch.__version__, "CUDA:", torch.version.cuda)
+assert postman.__version__ == "0.3.0", postman.__version__
+assert rpc.__grpc_version__ == "1.83.0", rpc.__grpc_version__
+assert rpc.__protobuf_version__ == "35.1", rpc.__protobuf_version__
+print(
+    "CUDA build:",
+    torch.__version__,
+    "CUDA:",
+    torch.version.cuda,
+    "Postman gRPC:",
+    rpc.__grpc_version__,
+)
 PY
 
-RUN rm -rf /app/dipcc/build
+RUN rm -rf -- \
+    /app/dipcc/build \
+    /app/build/postman-deps \
+    /app/build/postman-rpc
 
 FROM nvidia/cuda:${CUDA_VERSION}-cudnn-runtime-ubuntu${UBUNTU_VERSION} AS cuda-runtime
 
@@ -149,15 +165,25 @@ COPY --from=cuda-build /app /app
 
 WORKDIR /app
 RUN python - <<'PY'
+import postman
 import torch
 from fairdiplomacy import pydipcc
+from postman import rpc
 
 assert torch.__version__.split("+", 1)[0] == "2.13.0", torch.__version__
 assert torch.version.cuda == "13.0", torch.version.cuda
+assert postman.__version__ == "0.3.0", postman.__version__
+assert rpc.__grpc_version__ == "1.83.0", rpc.__grpc_version__
 game = pydipcc.Game()
 game.process()
 assert game.current_short_phase == "F1901M", game.current_short_phase
-print("CUDA runtime smoke passed:", torch.__version__, torch.version.cuda)
+print(
+    "CUDA runtime smoke passed:",
+    torch.__version__,
+    torch.version.cuda,
+    "Postman gRPC:",
+    rpc.__grpc_version__,
+)
 PY
 
 CMD ["/bin/bash"]
