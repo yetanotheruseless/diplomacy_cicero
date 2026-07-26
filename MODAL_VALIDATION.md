@@ -125,6 +125,11 @@ B1 exercised `no_press_human_imitation_policy.ckpt`,
 `torch 2.13.0+cu130`, CUDA 13.0, and an available NVIDIA A10 before running the
 model checks.
 
+The same commit passed both hosted Docker jobs in
+[GitHub Actions run `30213841461`](https://github.com/yetanotheruseless/diplomacy_cicero/actions/runs/30213841461):
+the CPU image built and passed its full verifier, and the complete
+`cuda-runtime` target constructed successfully.
+
 ## Relationship to Docker CI
 
 GitHub Actions proves that:
