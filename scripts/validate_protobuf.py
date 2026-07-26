@@ -16,6 +16,16 @@ import importlib
 import subprocess
 import traceback
 
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def configure_import_path() -> None:
+    """Run validation relative to the repository root."""
+    os.chdir(REPO_ROOT)
+    if REPO_ROOT not in sys.path:
+        sys.path.insert(0, REPO_ROOT)
+
+
 def print_section(title):
     """Print a section header."""
     print("\n" + "=" * 60)
@@ -91,7 +101,7 @@ def import_proto_modules(modules):
     for module_path in modules:
         module_name = module_path.replace("/", ".")
         try:
-            module = importlib.import_module(module_name)
+            importlib.import_module(module_name)
             import_results.append((module_name, True))
             print_result(True, f"Successfully imported {module_name}")
         except Exception as e:
@@ -105,57 +115,41 @@ def import_proto_modules(modules):
 def test_minimal_protobuf():
     """Test creating a minimal protobuf message."""
     print_section("TEST MINIMAL PROTOBUF")
-    
+
     try:
-        # Try to import minimal test proto
         try:
             import minimal_pb2
             print_result(True, "Imported minimal_pb2")
         except ImportError:
-            # If minimal.proto exists but minimal_pb2.py doesn't, try to compile it
-            if os.path.exists("minimal.proto"):
-                print("minimal.proto exists but minimal_pb2.py not found, compiling...")
-                subprocess.run(["protoc", "minimal.proto", "--python_out=./"], check=True)
-                import minimal_pb2
-                print_result(True, "Compiled and imported minimal_pb2")
-            else:
-                # Create a minimal proto file and compile it
-                print("Creating minimal test proto file...")
-                with open("minimal_test.proto", "w") as f:
-                    f.write("""
-                    syntax = "proto2";
-                    
-                    message TestMessage {
-                      optional string text = 1;
-                      optional int32 number = 2;
-                    }
-                    """)
-                
-                subprocess.run(["protoc", "minimal_test.proto", "--python_out=./"], check=True)
-                import minimal_test_pb2
-                module = minimal_test_pb2
-                print_result(True, "Created, compiled and imported minimal_test_pb2")
-        
+            if not os.path.exists("minimal.proto"):
+                raise FileNotFoundError("minimal.proto is missing")
+            print("minimal.proto exists but minimal_pb2.py was not found; compiling it")
+            subprocess.run(["protoc", "minimal.proto", "--python_out=./"], check=True)
+            importlib.invalidate_caches()
+            import minimal_pb2
+            print_result(True, "Compiled and imported minimal_pb2")
+
         # Create a test message
-        message = minimal_pb2.MinimalMessage()
+        message = minimal_pb2.TestMessage()
         message.text = "Test message for protobuf validation"
         message.number = 42
-        
+
         # Serialize and deserialize
         serialized = message.SerializeToString()
-        deserialized = minimal_pb2.MinimalMessage()
+        deserialized = minimal_pb2.TestMessage()
         deserialized.ParseFromString(serialized)
-        
+
         # Check if the round trip worked
-        round_trip_ok = (deserialized.text == message.text and 
-                        deserialized.number == message.number)
-        
+        round_trip_ok = (
+            deserialized.text == message.text and deserialized.number == message.number
+        )
+
         print_result(round_trip_ok, "Serialization and deserialization successful")
         print(f"Original message: text='{message.text}', number={message.number}")
         print(f"Deserialized message: text='{deserialized.text}', number={deserialized.number}")
-        
+
         return round_trip_ok
-    
+
     except Exception as e:
         print_result(False, f"Error in minimal protobuf test: {e}")
         traceback.print_exc()
@@ -164,32 +158,29 @@ def test_minimal_protobuf():
 def test_project_specific_proto():
     """Test loading a specific project protobuf message."""
     print_section("TEST PROJECT PROTOCOL BUFFERS")
-    
+
     try:
-        # Import the agents module which should be used in the project
         import conf.agents_pb2 as agents_pb2
-        
-        # Try to create an agent message
+
+        # Exercise the real Agent oneof rather than assigning a synthetic field.
         agent = agents_pb2.Agent()
-        agent.agent_type = "SEARCH_BOT"
-        
-        print_result(True, f"Successfully created agent message with type '{agent.agent_type}'")
-        
-        # Try serializing and deserializing
+        agent.random.SetInParent()
+        print_result(True, "Successfully created Agent(random=RandomAgent())")
+
         serialized = agent.SerializeToString()
         deserialized = agents_pb2.Agent()
         deserialized.ParseFromString(serialized)
-        
-        round_trip_ok = deserialized.agent_type == agent.agent_type
+
+        round_trip_ok = deserialized.WhichOneof("agent") == "random"
         print_result(round_trip_ok, "Project-specific proto serialization successful")
-        
+
         # Check if we can access other top-level messages
         if hasattr(agents_pb2, "DESCRIPTOR"):
             message_types = agents_pb2.DESCRIPTOR.message_types_by_name
             print(f"Available message types in agents.proto: {list(message_types.keys())}")
-        
+
         return round_trip_ok
-    
+
     except Exception as e:
         print_result(False, f"Error in project-specific protobuf test: {e}")
         traceback.print_exc()
@@ -197,6 +188,7 @@ def test_project_specific_proto():
 
 def main():
     """Run all validation tests."""
+    configure_import_path()
     results = {}
     
     # Run all tests

@@ -90,12 +90,17 @@ RUN pip install cython==0.29.24
 RUN echo "✅ Compiling protobuf files..." && \
     make protos_basic && \
     echo "  ✓ Protocol buffer files compiled successfully" && \
-    python scripts/validate_protobuf.py || echo "  ⚠️ Protobuf validation failed but continuing build"
+    python scripts/validate_protobuf.py
 
 # PHASE 4: Build dipcc (C++ game logic)
 # ==============================================
-# Install pybind11 and other required packages
-RUN pip install pybind11 numpy==1.20.3 torch==1.10.0 cython==0.29.24
+# Install pybind11 and the CPU-only Torch wheel used to compile pydipcc.
+# The default 1.10.0 Linux wheel is CUDA-enabled, which makes
+# find_package(Torch) require a CUDA toolkit even in this CPU image.
+RUN pip install pybind11 numpy==1.20.3 cython==0.29.24 && \
+    pip install torch==1.10.0+cpu \
+        --index-url https://download.pytorch.org/whl/cpu && \
+    python -c "import torch; assert torch.__version__ == '1.10.0+cpu'; assert torch.version.cuda is None"
 RUN apt-get update && \
     apt-get install -y python3-dev pybind11-dev && \
     apt-get clean && \
@@ -160,7 +165,7 @@ RUN echo '#!/usr/bin/env python' > /app/fairdiplomacy/__init__.py && \
 # Run the pydipcc test
 RUN echo "✅ Testing pydipcc module..." && \
     find /app/fairdiplomacy -name "pydipcc*.so" && \
-    python /app/test_pydipcc.py || echo "  ⚠️ Tests failed but continuing build"
+    python /app/test_pydipcc.py
 
 # PHASE 6: Install additional requirements
 # ==============================================
@@ -181,11 +186,8 @@ RUN echo "✅ Final environment verification:" && \
 # ==============================================
 RUN echo "✅ Running comprehensive build verification..." && \
     chmod +x /app/scripts/verify_full_build.sh && \
-    if /app/scripts/verify_full_build.sh; then \
-        echo "  ✓ Full build verification PASSED"; \
-    else \
-        echo "  ⚠️ Full build verification failed but continuing build"; \
-    fi && \
+    /app/scripts/verify_full_build.sh && \
+    echo "  ✓ Full build verification PASSED" && \
     echo "" && \
     echo "✅ Build complete! Use the following to test the environment:" && \
     echo "  python /app/test_pydipcc.py" && \
