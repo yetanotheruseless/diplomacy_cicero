@@ -132,10 +132,6 @@ node_modules/
 /modal_cicero_*_output.json
 /modal_cicero_game_*.json
 /minimal_pb2.py
-/minimal_test.proto
-/minimal_test_pb2.py
-/test_message_pb2.py
-/test_pb2.py
 *.bak
 *.orig
 *.rej

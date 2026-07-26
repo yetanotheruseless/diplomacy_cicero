@@ -1,0 +1,75 @@
+diff --git a/setup.py b/setup.py
+--- a/setup.py
++++ b/setup.py
+@@ -7,34 +7,23 @@
+
+-import sys
+-
+ from setuptools import setup, find_packages
+
+-VERSION = '1.5.1'  # if you update, update parlai/__init__.py too!
+-
+-if sys.version_info < (3, 7):
+-    sys.exit('Sorry, Python >=3.7 is required for ParlAI.')
++VERSION = '1.5.1+cicero1'
+
+ with open('README.md', encoding="utf8") as f:
+     # strip the header and badges etc
+     readme = f.read().split('--------------------')[-1]
+
+-with open('requirements.txt') as f:
+-    reqs = []
+-    for line in f:
+-        line = line.strip()
+-        reqs.append(line.split('==')[0])
+-
+
+ if __name__ == '__main__':
+     setup(
+         name='parlai',
+         version=VERSION,
+         description='Unified platform for dialogue research.',
+         long_description=readme,
+         long_description_content_type='text/markdown',
+         url='http://parl.ai/',
+-        python_requires='>=3.7',
++        python_requires='>=3.12,<3.13',
+         packages=find_packages(exclude=('data', 'docs', 'tests', 'parlai_internal*')),
+-        install_requires=reqs,
++        install_requires=[],
+         include_package_data=True,
+         package_data={'': ['*.txt', '*.md', '*.opt']},
+diff --git a/parlai/__init__.py b/parlai/__init__.py
+--- a/parlai/__init__.py
++++ b/parlai/__init__.py
+@@ -7 +7 @@
+-__version__ = '1.5.1'
++__version__ = '1.5.1+cicero1'
+diff --git a/parlai/core/opt.py b/parlai/core/opt.py
+--- a/parlai/core/opt.py
++++ b/parlai/core/opt.py
+@@ -13,7 +13,8 @@
+ import copy
++from importlib.resources import as_file, files
+ import json
++import os
+ import pickle
+ import traceback
+-import os
+-import pkg_resources
++
+ import parlai.utils.logging as logging
+@@ -165,9 +166,9 @@ class Opt(dict):
+             # Maybe a bundled opt preset
+             for root in ['parlai', 'parlai_internal', 'parlai_fb']:
+                 try:
+-                    if pkg_resources.resource_exists(root, oa_filename):
+-                        return cls.load(
+-                            pkg_resources.resource_filename(root, oa_filename)
+-                        )
++                    resource = files(root).joinpath(oa_filename)
++                    if resource.is_file():
++                        with as_file(resource) as resource_path:
++                            return cls.load(str(resource_path))
+                 except ModuleNotFoundError:
+                     continue

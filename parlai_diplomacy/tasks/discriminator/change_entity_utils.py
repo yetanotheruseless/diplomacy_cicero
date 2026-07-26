@@ -297,7 +297,7 @@ def get_consistant_replacements(
 ) -> List[Tuple[int, int, str, str]]:
     flattened_replacements = []
     possible_replacements = get_possible_replacements(typ, entity)
-    repl = random.sample(possible_replacements, 1)[0]
+    repl = random.sample(sorted(possible_replacements), 1)[0]
     for s_idx, e_idx, original_span in instances:
         orig = original_span[1:-1]  # removing the boundary characters
         repl_span = (

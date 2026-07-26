@@ -1,91 +1,115 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.28)
 project(dipcc VERSION 0.0.1 LANGUAGES CXX)
-set(CMAKE_CXX_STANDARD 17)
 
-# For pybind11 to work on Linux.
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Set default output directory
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/out)
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/out)
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/out)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/out")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/out")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/out")
 
-# Declare dependencies
-find_package(PythonInterp 3 REQUIRED)
-find_package(PythonLibs 3 REQUIRED)
-find_package(pybind11 REQUIRED)
-include_directories(${PYTHON_INCLUDE_DIRS})
-include_directories(${pybind11_INCLUDE_DIR})
-link_directories($ENV{CONDA_PREFIX}/lib/)
+find_package(Python 3.12 REQUIRED COMPONENTS Interpreter Development.Module)
+set(PYBIND11_FINDPYTHON ON)
+find_package(pybind11 3 CONFIG REQUIRED)
+find_package(Threads REQUIRED)
 
-# glog/gflags: on the legacy conda toolchain these are under $CONDA_PREFIX and
-# picked up implicitly. On Homebrew (macOS/arm64) they live under their own
-# prefixes and must be added explicitly. Look them up portably and fall back to
-# common Homebrew locations so the include path (glog/logging.h) resolves.
-find_package(glog QUIET)
-find_package(gflags QUIET)
+# Prefer Homebrew's current libraries over unrelated packages exposed by an
+# activated Conda installation.
 foreach(_brew_pkg glog gflags)
   foreach(_brew_prefix /opt/homebrew/opt /usr/local/opt)
     if(EXISTS "${_brew_prefix}/${_brew_pkg}/include")
-      include_directories("${_brew_prefix}/${_brew_pkg}/include")
-      link_directories("${_brew_prefix}/${_brew_pkg}/lib")
+      list(PREPEND CMAKE_PREFIX_PATH "${_brew_prefix}/${_brew_pkg}")
     endif()
   endforeach()
 endforeach()
-# Modern glog (>= 0.6) requires GLOG_USE_GLOG_EXPORT so that <glog/logging.h>
-# pulls in glog/export.h (which defines GLOG_EXPORT). The legacy conda glog
-# (0.4/0.5) did not need this. Define it unconditionally; it is a no-op on old
-# glog. Also suppress the abbreviated severities (LOG, INFO...) clash guard
-# defensively.
-add_definitions(-DGLOG_USE_GLOG_EXPORT)
 
-# Compiler flags
+find_package(gflags CONFIG REQUIRED)
+find_package(glog CONFIG REQUIRED)
+
+# glog >=0.6 requires this when consumers include <glog/logging.h>.
+add_compile_definitions(GLOG_USE_GLOG_EXPORT)
+
+if(TARGET glog::glog)
+  set(DIPCC_GLOG_TARGET glog::glog)
+else()
+  message(FATAL_ERROR "The glog package did not define the glog::glog target")
+endif()
+
+execute_process(
+  COMMAND
+    "${Python_EXECUTABLE}" -c
+    "import torch; print(torch.utils.cmake_prefix_path, end='')"
+  RESULT_VARIABLE TORCH_PREFIX_RESULT
+  OUTPUT_VARIABLE TORCH_CMAKE_PREFIX
+  ERROR_VARIABLE TORCH_PREFIX_ERROR
+)
+if(NOT TORCH_PREFIX_RESULT EQUAL 0)
+  message(FATAL_ERROR "Unable to locate Torch with ${Python_EXECUTABLE}: ${TORCH_PREFIX_ERROR}")
+endif()
+
+list(APPEND CMAKE_PREFIX_PATH "${TORCH_CMAKE_PREFIX}")
+find_package(Torch CONFIG REQUIRED)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
+
+execute_process(
+  COMMAND
+    "${Python_EXECUTABLE}" -c
+    "import torch; print(torch.__path__[0], end='')"
+  RESULT_VARIABLE TORCH_PATH_RESULT
+  OUTPUT_VARIABLE TORCH_PATH
+  ERROR_VARIABLE TORCH_PATH_ERROR
+)
+if(NOT TORCH_PATH_RESULT EQUAL 0)
+  message(FATAL_ERROR "Unable to locate the Torch package: ${TORCH_PATH_ERROR}")
+endif()
+
+find_library(
+  TORCH_PYTHON_LIBRARY
+  NAMES torch_python libtorch_python
+  PATHS "${TORCH_PATH}/lib"
+  NO_DEFAULT_PATH
+  REQUIRED
+)
+
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -pg")
 
-# Include torch
-# ABI stuff must go before any add_subdirectory.
-execute_process(
-  COMMAND python -c "import torch; import os; print(int(torch._C._GLIBCXX_USE_CXX11_ABI), end='')"
-  OUTPUT_VARIABLE TorchAbi
-)
-add_definitions(-D_GLIBCXX_USE_CXX11_ABI=${TorchAbi})
-execute_process(
-  COMMAND python -c "import torch; import os; print(os.path.dirname(torch.__file__), end='')"
-  OUTPUT_VARIABLE TORCH_PATH
-)
-list(APPEND CMAKE_PREFIX_PATH ${TORCH_PATH})
-# set cuda arch list so that the built binary can be run on both pascal and volta
-set(TORCH_CUDA_ARCH_LIST "6.0;7.0")
-find_package(Torch REQUIRED)
-# libtorch_python is a .so on Linux but a .dylib on macOS. Resolve portably.
-if(APPLE)
-  set(TORCH_PYTHON_LIBRARIES "${TORCH_PATH}/lib/libtorch_python.dylib")
-else()
-  set(TORCH_PYTHON_LIBRARIES "${TORCH_PATH}/lib/libtorch_python.so")
-endif()
+file(GLOB SOURCES CONFIGURE_DEPENDS "dipcc/cc/*.cc")
+file(GLOB PY_SOURCES CONFIGURE_DEPENDS "dipcc/pybind/*.cc")
 
-# Compile dipcc
-file(GLOB SOURCES "dipcc/cc/*.cc")
+set(DIPCC_LINK_LIBRARIES
+    ${DIPCC_GLOG_TARGET}
+    Threads::Threads
+    ${TORCH_LIBRARIES}
+    ${TORCH_PYTHON_LIBRARY}
+)
+
 add_library(dipcc ${SOURCES})
 target_compile_options(dipcc PRIVATE -Wall -Wextra -pedantic -Wno-sign-compare)
-target_link_libraries(dipcc glog pthread ${TORCH_LIBRARIES} ${TORCH_PYTHON_LIBRARIES})
+target_link_libraries(dipcc PRIVATE ${DIPCC_LINK_LIBRARIES})
 
-# Compile python interface
-file(GLOB PY_SOURCES "dipcc/pybind/*.cc")
 pybind11_add_module(pydipcc ${PY_SOURCES} ${SOURCES})
-target_link_libraries(pydipcc PRIVATE glog pthread ${TORCH_LIBRARIES} ${TORCH_PYTHON_LIBRARIES})
-IF (DEFINED ENV{PYDIPCC_OUT_DIR})
-    set_target_properties(pydipcc PROPERTIES LIBRARY_OUTPUT_DIRECTORY $ENV{PYDIPCC_OUT_DIR})
-ELSE()
-    set_target_properties(pydipcc PROPERTIES LIBRARY_OUTPUT_DIRECTORY "dipcc/python/")
-ENDIF()
+target_link_libraries(pydipcc PRIVATE ${DIPCC_LINK_LIBRARIES})
+if(DEFINED ENV{PYDIPCC_OUT_DIR})
+  set_target_properties(
+    pydipcc PROPERTIES LIBRARY_OUTPUT_DIRECTORY "$ENV{PYDIPCC_OUT_DIR}"
+  )
+else()
+  set_target_properties(
+    pydipcc PROPERTIES LIBRARY_OUTPUT_DIRECTORY "dipcc/python/"
+  )
+endif()
 
-# Compile profiling
-IF(CMAKE_BUILD_TYPE MATCHES Release)
-    add_executable(profile_dipcc dipcc/profiling/profile.cc ${SOURCES})
-    target_link_libraries(profile_dipcc dipcc glog pthread)
+if(CMAKE_BUILD_TYPE MATCHES Release)
+  add_executable(profile_dipcc dipcc/profiling/profile.cc ${SOURCES})
+  target_link_libraries(
+    profile_dipcc PRIVATE dipcc ${DIPCC_GLOG_TARGET} Threads::Threads
+  )
 
-    add_executable(profile_dipcc_late dipcc/profiling/profile_late.cc ${SOURCES})
-    target_link_libraries(profile_dipcc_late dipcc glog pthread)
-ENDIF()
+  add_executable(profile_dipcc_late dipcc/profiling/profile_late.cc ${SOURCES})
+  target_link_libraries(
+    profile_dipcc_late PRIVATE dipcc ${DIPCC_GLOG_TARGET} Threads::Threads
+  )
+endif()

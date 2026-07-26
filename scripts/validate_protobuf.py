@@ -1,217 +1,161 @@
 #!/usr/bin/env python3
-"""
-Validation script for testing protobuf compilation and version compatibility.
+"""Fail-fast validation for the modern protobuf compiler and runtime."""
 
-This script:
-1. Verifies the installed protobuf version
-2. Tests loading all compiled protobuf modules
-3. Creates a simple test message to verify serialization
-4. Validates required protobuf features are working
-"""
+from __future__ import annotations
 
-import os
-import sys
-import glob
+import argparse
 import importlib
+import importlib.metadata
+import importlib.util
+from pathlib import Path
 import subprocess
-import traceback
+import sys
+import tempfile
+from types import ModuleType
+from typing import Sequence
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+EXPECTED_PROTOBUF_RUNTIME = "7.35.1"
+EXPECTED_PROTOC = "35.1"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+EXPECTED_PROJECT_MODULES = (
+    "conf.agents_pb2",
+    "conf.common_pb2",
+    "conf.conf_pb2",
+    "conf.misc_pb2",
+)
 
 
-def configure_import_path() -> None:
-    """Run validation relative to the repository root."""
-    os.chdir(REPO_ROOT)
-    if REPO_ROOT not in sys.path:
-        sys.path.insert(0, REPO_ROOT)
+class ValidationError(RuntimeError):
+    """Raised when the protobuf toolchain violates the project contract."""
 
 
-def print_section(title):
-    """Print a section header."""
-    print("\n" + "=" * 60)
-    print(f" {title} ".center(60, "-"))
-    print("=" * 60)
+def require(condition: bool, message: str) -> None:
+    """Raise a descriptive validation error when a contract is not satisfied."""
+    if not condition:
+        raise ValidationError(message)
 
-def print_result(success, message):
-    """Print a test result."""
-    status = "PASS" if success else "FAIL"
-    print(f"[{status}] {message}")
-    return success
 
-def check_protobuf_version():
-    """Verify the installed protobuf version is 3.19.1."""
-    print_section("PROTOBUF VERSION CHECK")
-    
-    # Check Python protobuf version
-    try:
-        import google.protobuf
-        pyversion = google.protobuf.__version__
-        py_success = pyversion == "3.19.1"
-        print_result(py_success, f"Python protobuf version: {pyversion} (expecting 3.19.1)")
-    except ImportError:
-        traceback.print_exc()
-        py_success = False
-        print_result(False, "Failed to import Python protobuf")
-    
-    # Check protoc version
-    try:
-        result = subprocess.run(["protoc", "--version"], 
-                               capture_output=True, text=True, check=True)
-        protoc_version = result.stdout.strip()
-        protoc_success = "3.19.1" in protoc_version
-        print_result(protoc_success, f"protoc version: {protoc_version} (expecting 3.19.1)")
-    except (subprocess.SubprocessError, FileNotFoundError):
-        traceback.print_exc()
-        protoc_success = False
-        print_result(False, "Failed to check protoc version")
-    
-    return py_success and protoc_success
+def check_runtime_version() -> None:
+    """Require the single supported Python protobuf runtime."""
+    import google.protobuf
 
-def find_proto_modules():
-    """Find all compiled protobuf modules."""
-    print_section("FIND PROTOBUF MODULES")
-    
-    # Expected modules
-    expected_modules = [
-        "conf/conf_pb2",
-        "conf/agents_pb2",
-        "conf/common_pb2",
-        "conf/misc_pb2"
-    ]
-    
-    # Find all *_pb2.py files
-    pb2_files = glob.glob("conf/*_pb2.py")
-    found_modules = [os.path.splitext(f)[0] for f in pb2_files]
-    
-    print(f"Found {len(found_modules)} protobuf modules:")
-    for module in found_modules:
-        print(f"  - {module}")
-    
-    # Check if all expected modules were found
-    all_expected_found = all(module in found_modules for module in expected_modules)
-    print_result(all_expected_found, "All expected protobuf modules found")
-    
-    return found_modules, all_expected_found
+    distribution_version = importlib.metadata.version("protobuf")
+    module_version = google.protobuf.__version__
+    require(
+        distribution_version == EXPECTED_PROTOBUF_RUNTIME,
+        f"Expected protobuf distribution {EXPECTED_PROTOBUF_RUNTIME}; found {distribution_version}",
+    )
+    require(
+        module_version == EXPECTED_PROTOBUF_RUNTIME,
+        f"Expected google.protobuf {EXPECTED_PROTOBUF_RUNTIME}; found {module_version}",
+    )
+    print(f"protobuf runtime: {module_version}")
 
-def import_proto_modules(modules):
-    """Try to import all protobuf modules."""
-    print_section("IMPORT PROTOBUF MODULES")
-    
-    import_results = []
-    for module_path in modules:
-        module_name = module_path.replace("/", ".")
-        try:
-            importlib.import_module(module_name)
-            import_results.append((module_name, True))
-            print_result(True, f"Successfully imported {module_name}")
-        except Exception as e:
-            import_results.append((module_name, False))
-            print_result(False, f"Failed to import {module_name}: {e}")
-            traceback.print_exc()
-    
-    all_imports_ok = all(result for _, result in import_results)
-    return all_imports_ok
 
-def test_minimal_protobuf():
-    """Test creating a minimal protobuf message."""
-    print_section("TEST MINIMAL PROTOBUF")
+def check_protoc_version() -> None:
+    """Require the matching modern protoc release."""
+    result = subprocess.run(
+        ["protoc", "--version"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    installed = result.stdout.strip()
+    expected = f"libprotoc {EXPECTED_PROTOC}"
+    require(installed == expected, f"Expected {expected}; found {installed}")
+    print(f"protobuf compiler: {installed}")
 
-    try:
-        try:
-            import minimal_pb2
-            print_result(True, "Imported minimal_pb2")
-        except ImportError:
-            if not os.path.exists("minimal.proto"):
-                raise FileNotFoundError("minimal.proto is missing")
-            print("minimal.proto exists but minimal_pb2.py was not found; compiling it")
-            subprocess.run(["protoc", "minimal.proto", "--python_out=./"], check=True)
-            importlib.invalidate_caches()
-            import minimal_pb2
-            print_result(True, "Compiled and imported minimal_pb2")
 
-        # Create a test message
-        message = minimal_pb2.TestMessage()
-        message.text = "Test message for protobuf validation"
-        message.number = 42
+def validate_project_modules() -> None:
+    """Import every generated project module and require the core module set."""
+    generated_paths = sorted((REPO_ROOT / "conf").glob("*_pb2.py"))
+    generated_modules = tuple(f"conf.{path.stem}" for path in generated_paths)
+    missing = sorted(set(EXPECTED_PROJECT_MODULES) - set(generated_modules))
+    require(bool(generated_modules), "No generated conf/*_pb2.py modules were found")
+    require(not missing, f"Missing generated protobuf modules: {', '.join(missing)}")
 
-        # Serialize and deserialize
-        serialized = message.SerializeToString()
-        deserialized = minimal_pb2.TestMessage()
-        deserialized.ParseFromString(serialized)
+    for module_name in generated_modules:
+        importlib.import_module(module_name)
+        print(f"imported: {module_name}")
 
-        # Check if the round trip worked
-        round_trip_ok = (
-            deserialized.text == message.text and deserialized.number == message.number
+
+def load_module(module_name: str, path: Path) -> ModuleType:
+    """Load a generated module from an isolated temporary path."""
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    require(spec is not None and spec.loader is not None, f"Could not load module spec for {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_compiler_runtime_round_trip() -> None:
+    """Compile a minimal schema in a temporary directory and round-trip a message."""
+    with tempfile.TemporaryDirectory(prefix="cicero-protobuf-") as temp_dir:
+        output_dir = Path(temp_dir)
+        subprocess.run(
+            [
+                "protoc",
+                f"--proto_path={REPO_ROOT}",
+                f"--python_out={output_dir}",
+                "minimal.proto",
+            ],
+            cwd=REPO_ROOT,
+            check=True,
         )
+        minimal_pb2 = load_module("_cicero_minimal_pb2", output_dir / "minimal_pb2.py")
+        message = minimal_pb2.TestMessage(text="modern protobuf", number=35)
+        restored = minimal_pb2.TestMessage.FromString(message.SerializeToString())
+        require(
+            restored == message, "Minimal protobuf serialization round-trip changed the message"
+        )
+    print("compiler/runtime round-trip: passed")
 
-        print_result(round_trip_ok, "Serialization and deserialization successful")
-        print(f"Original message: text='{message.text}', number={message.number}")
-        print(f"Deserialized message: text='{deserialized.text}', number={deserialized.number}")
 
-        return round_trip_ok
+def test_project_message_round_trip() -> None:
+    """Exercise a real project oneof and its serialization contract."""
+    from conf import agents_pb2
 
-    except Exception as e:
-        print_result(False, f"Error in minimal protobuf test: {e}")
-        traceback.print_exc()
-        return False
+    agent = agents_pb2.Agent()
+    agent.random.SetInParent()
+    restored = agents_pb2.Agent.FromString(agent.SerializeToString())
+    require(
+        restored.WhichOneof("agent") == "random", "Agent oneof round-trip lost the random variant"
+    )
+    print("project message round-trip: passed")
 
-def test_project_specific_proto():
-    """Test loading a specific project protobuf message."""
-    print_section("TEST PROJECT PROTOCOL BUFFERS")
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--runtime-only",
+        action="store_true",
+        help="Skip protoc checks for a stripped runtime image that contains generated modules only.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run validation in dependency order and stop at the first failure."""
+    args = parse_args(argv)
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
 
     try:
-        import conf.agents_pb2 as agents_pb2
-
-        # Exercise the real Agent oneof rather than assigning a synthetic field.
-        agent = agents_pb2.Agent()
-        agent.random.SetInParent()
-        print_result(True, "Successfully created Agent(random=RandomAgent())")
-
-        serialized = agent.SerializeToString()
-        deserialized = agents_pb2.Agent()
-        deserialized.ParseFromString(serialized)
-
-        round_trip_ok = deserialized.WhichOneof("agent") == "random"
-        print_result(round_trip_ok, "Project-specific proto serialization successful")
-
-        # Check if we can access other top-level messages
-        if hasattr(agents_pb2, "DESCRIPTOR"):
-            message_types = agents_pb2.DESCRIPTOR.message_types_by_name
-            print(f"Available message types in agents.proto: {list(message_types.keys())}")
-
-        return round_trip_ok
-
-    except Exception as e:
-        print_result(False, f"Error in project-specific protobuf test: {e}")
-        traceback.print_exc()
-        return False
-
-def main():
-    """Run all validation tests."""
-    configure_import_path()
-    results = {}
-    
-    # Run all tests
-    results["version_check"] = check_protobuf_version()
-    modules, results["modules_found"] = find_proto_modules()
-    results["imports_ok"] = import_proto_modules(modules)
-    results["minimal_test"] = test_minimal_protobuf()
-    results["project_test"] = test_project_specific_proto()
-    
-    # Print summary
-    print_section("SUMMARY")
-    all_passed = all(results.values())
-    
-    for test, result in results.items():
-        status = "PASS" if result else "FAIL"
-        print(f"{test.ljust(20)}: {status}")
-    
-    if all_passed:
-        print("\n✅ All protobuf validation tests passed!")
-        return 0
-    else:
-        print("\n❌ Some protobuf validation tests failed")
+        check_runtime_version()
+        if not args.runtime_only:
+            check_protoc_version()
+            test_compiler_runtime_round_trip()
+        validate_project_modules()
+        test_project_message_round_trip()
+    except ValidationError as error:
+        print(f"protobuf validation failed: {error}", file=sys.stderr)
         return 1
 
+    mode = "runtime" if args.runtime_only else "compiler and runtime"
+    print(f"Modern protobuf {mode} validation passed.")
+    return 0
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

@@ -232,7 +232,7 @@ def get_game_paths(
                 game_ids = metadata.keys()
 
             if dataset_for_eval:
-                train_cache, eval_cache = torch.load(dataset_for_eval)
+                train_cache, eval_cache = torch.load(dataset_for_eval, weights_only=False)
                 del train_cache
                 game_ids = eval_cache.game_ids
                 print(

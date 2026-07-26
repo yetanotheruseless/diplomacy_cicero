@@ -1,311 +1,218 @@
 # Diplomacy Cicero and Diplodocus
 
-This code contains checkpoints and training code for the following papers:
+This fork runs Meta/FAIR's Cicero and Diplodocus Diplomacy agents on one
+modern runtime. It contains inference and training code associated with:
 
-* ["Human-Level Play in the Game of Diplomacy by Combining Language Models with Strategic Reasoning"](https://www.science.org/doi/10.1126/science.ade9097) published in Science, November 2022.
-* ["Mastering the Game of No-Press Diplomacy via Human-Regularized Reinforcement Learning and Planning"](https://arxiv.org/abs/2210.05492) accepted to ICLR 2023.
+- ["Human-Level Play in the Game of Diplomacy by Combining Language Models
+  with Strategic Reasoning"](https://www.science.org/doi/10.1126/science.ade9097)
+- ["Mastering the Game of No-Press Diplomacy via Human-Regularized
+  Reinforcement Learning and Planning"](https://arxiv.org/abs/2210.05492)
 
-### Code
-A very brief orientation:
-- Most of the language modeling and generation code is in [parlai_diplomacy](parlai_diplomacy), and leverages the [ParlAI framework](https://github.com/facebookresearch/ParlAI) for running and finetuning the language models involved.
-- Within the [agents](fairdiplomacy/agents) directory, the central logic for Cicero's strategic planning lives [here](fairdiplomacy/agents/br_corr_bilateral_search.py) and [here](fairdiplomacy/agents/bqre1p_agent.py). The latter also contains the core logic for Diplodocus's strategic planning. "bqre1p" was the internal dev name for DiL-piKL, and "br_corr_bilateral" the internal dev name for Cicero's bilateral and correlated planning components.
-- The dialogue-free model architectures for RL are [here](fairdiplomacy/models/base_strategy_model/base_strategy_model.py), and the bulk of the training logic lives [here](fairdiplomacy/models/base_strategy_model/train_sl.py)
-- The RL training code for both Cicero and Diplodocus is [here](fairdiplomacy/selfplay)
-- The [conf](conf) directory contains various configs for Cicero, Diplodocus, benchmark agents, and training configs for RL.
-- A separately licensed subfolder of this repo [here](fairdiplomacy_external) contains some utilities for visually rendering games, or connecting agents to be run online.
+## Supported runtime
 
-### Game info
-Diplomacy is a strategic board game set in 1914 Europe.
-The board is divided into fifty-six land regions and nineteen sea regions.
-Forty-two of the land regions are divided among the seven Great Powers of the game: Austria-Hungary, England, France, Germany, Italy, Russia, and Turkey.
-The remaining fourteen land regions are neutral at the start of the game.
+There is one supported software stack. CPU and GPU are two builds of the same
+stack, not separate compatibility tracks.
 
-Each power controls some regions and some units.
-The number of the units controlled depends on the number of the controlled key regions called Supply Centers (SCs).
-Simply put, more SCs means more units.
-The goal of the game is to control more than half of all SCs by moving units into these regions and convincing other players to support you.
+| Component | Supported version |
+|---|---|
+| Operating system | Ubuntu 24.04 |
+| Python | 3.12 |
+| PyTorch | 2.13.0 |
+| CPU wheel | `torch==2.13.0+cpu` |
+| GPU wheel | `torch==2.13.0+cu130` |
+| CUDA userspace | 13.0 (`nvidia/cuda:13.0.3`) |
+| NumPy | 2.4.6 |
+| protobuf runtime | 7.35.1 |
+| protobuf compiler | protoc 35.1 |
+| pybind11 | 3.0.4 |
+| ParlAI | Cicero-compatible commit `5214f42…`, patched and packaged as `1.5.1+cicero1` |
+| C++ | C++20, CMake 3.28+, GCC 13 |
 
-You can find the full rules [here](https://en.wikibooks.org/wiki/Diplomacy/Rules).
-To get the game's spirit, watch [some](https://www.youtube.com/c/diplostrats) [games](https://www.youtube.com/playlist?list=PLmbDtCxqXA5CyFoBmB5dJHHOHeLQ0Nd-Y) with comments.
-You can play the game online on [webDiplomacy](https://webdiplomacy.net/) either against bots or humans.
+Do not install protobuf or ParlAI from unpinned system/package-manager
+defaults. Generated protobuf modules, `pydipcc`, PyTorch, and ParlAI must all
+come from this version contract.
 
-### Installation
+## Quick start with Docker
 
-#### Docker Method (Recommended)
-The most reliable way to set up the environment is using Docker with our unified build system, which provides a consistent Ubuntu-based environment:
+Docker is the supported development and validation path. The repository has
+one multi-stage [`Dockerfile`](Dockerfile):
 
-```bash
-# Build with default settings
-./scripts/docker_build.sh
+- `cpu-build` contains the complete CPU development runtime.
+- `cuda-runtime` contains the complete CUDA 13.0 runtime.
 
-# Build with custom settings (adjust for your system)
-./scripts/docker_build.sh --jobs 4 --memory 8g
-
-# Start the container
-docker-compose up -d
-
-# Access the running container
-docker-compose exec diplomacy bash
-
-# Test if dipcc (C++ game engine) is working correctly
-docker-compose exec diplomacy python /app/test_pydipcc.py
-
-# Verify the full build is working end-to-end
-docker-compose exec diplomacy ./scripts/verify_full_build.sh
-```
-
-The build script supports several options:
-- `--file`: Specify which Dockerfile to use (default: Dockerfile.unified)
-- `--jobs`: Number of parallel build jobs for C++ compilation (default: 2)
-- `--memory`: Memory limit for build (e.g., 4g for 4GB)
-
-You can get recommended build settings for your specific hardware:
+Build and verify the CPU image:
 
 ```bash
-# Get platform-specific build recommendations
-./scripts/detect_platform.sh
+docker build --target cpu-build -t diplomacy-cicero:cpu .
+docker run --rm diplomacy-cicero:cpu \
+  ./scripts/verify_full_build.sh --accelerator cpu
 ```
 
-For cross-platform compatibility testing (x86_64 and ARM64):
+The equivalent Compose workflow is:
 
 ```bash
-# Test Docker build on multiple platforms
-./scripts/test_cross_platform.sh
+docker compose build diplomacy
+docker compose --profile test run --rm diplomacy_test
+docker compose run --rm diplomacy bash
 ```
 
-For detailed information about the Docker build system, see:
-- [docs/unified_docker.md](docs/unified_docker.md) - Unified Docker build system documentation
-- [docs/docker_release.md](docs/docker_release.md) - Docker release process and versioning
-- [docs/dipcc_integration.md](docs/dipcc_integration.md) - Integration between C++ and Python components
-
-Alternatively, you can use the Docker image directly:
+On a Linux host with an NVIDIA driver compatible with CUDA 13.0, build and
+verify the GPU image:
 
 ```bash
-# Build the Docker image
-docker build -t diplomacy_cicero -f Dockerfile.unified .
-
-# Run a container with the current directory mounted
-docker run -it -v $(pwd):/app diplomacy_cicero bash
+docker build --target cuda-runtime -t diplomacy-cicero:cuda .
+docker run --rm --gpus all diplomacy-cicero:cuda \
+  ./scripts/verify_full_build.sh --accelerator cuda --require-gpu
 ```
 
-This will create a Docker container with all dependencies properly installed, including the C++ components (dipcc), with the codebase ready to use. See [DIPCC_BUILD_NOTES.md](DIPCC_BUILD_NOTES.md) for detailed information about the C++ build process.
+Docker Desktop on macOS can build and run the Ubuntu CPU image but does not
+pass through an NVIDIA GPU. See [README_MACOS.md](README_MACOS.md).
 
-#### Architecture and Module Integration
+## Local CPU development
 
-For detailed documentation on how the C++ components (dipcc) integrate with the Python codebase:
+Host-native setup is a developer convenience; Ubuntu 24.04 remains the release
+runtime. Install Git, Make, `uv`, CMake 3.28+, Ninja, a C++20 compiler, glog,
+gflags, `curl`, and `unzip`, then run:
 
-- [dipcc_integration.md](docs/dipcc_integration.md) - Explains the relationship between dipcc and fairdiplomacy.pydipcc
-- [module_dependencies.md](docs/module_dependencies.md) - Visual diagrams of module dependencies
-- [DOCKER_GUIDE.md](DOCKER_GUIDE.md) - Guide for using Docker with this codebase
-- [DOCKER_USAGE.md](DOCKER_USAGE.md) - Instructions for development in the Docker environment
-
-#### Alternative Methods
-
-We also provide several alternative setup methods:
-
-1. Using conda (recommended for Linux/Ubuntu systems):
-   ```bash
-   # Run the conda setup script
-   ./scripts/setup_conda_env.sh
-   
-   # Activate the environment
-   conda activate diplomacy_cicero
-   ```
-
-2. Using `uv` (faster dependency resolution):
-   ```bash
-   # Install uv if not already available
-   pip install uv
-   
-   # Run the setup script
-   ./scripts/setup_env.sh
-   
-   # Activate the environment
-   source .venv/bin/activate
-   ```
-
-3. Using standard pip:
-   ```bash
-   # Run the setup script
-   ./scripts/setup_env_pip.sh
-   
-   # Activate the environment
-   source .venv/bin/activate
-   ```
-
-Note: You need to have the Protocol Buffer Compiler (protoc) installed:
-- On macOS: `brew install protobuf`
-- On Ubuntu: `apt-get install protobuf-compiler`
-
-#### Original Method
-
-Most of the code of the project implemented in Python with some parts in C++. The snippet below show how to install and build all required components within a conda environment on Ubuntu system. You would need C++ compiler with C++11 support. We use gcc 9.4.
-
-```
-# Clone the repo with submodules:
-git clone --recursive git@github.com:facebookresearch/diplomacy_cicero.git diplomacy_cicero
-cd diplomacy_cicero
-
-# Apt installs
-apt-get install -y wget bzip2 ca-certificates curl git build-essential clang-format-8 git wget cmake build-essential autoconf libtool pkg-config libgoogle-glog-dev
-
-# Install conda
-wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-4.7.10-Linux-x86_64.sh -O ~/miniconda.sh
-/bin/bash ~/miniconda.sh -b
-
-# Create conda env
-conda create --yes -n diplomacy_cicero python=3.7
-conda activate diplomacy_cicero
-
-# Install pytorch, pybind11
-conda install --yes pytorch=1.7.1 torchvision cudatoolkit=11.0 -c pytorch
-conda install --yes pybind11
-
-# Install go for boringssl in grpc
-# We have some hacky patching code for protobuf that is not guaranteed
-# to work on versions other than this.
-conda install --yes go protobuf=3.19.1
-
-# Install python requirements
-pip install -r requirements.txt
-
-# Local pip installs
-pip install -e ./thirdparty/github/fairinternal/postman/nest/
-# NOTE: Postman here links against pytorch for tensors, for this to work you may
-# need to separately have installed cuda 11 on your own.
-pip install -e ./thirdparty/github/fairinternal/postman/postman/
-pip install -e . -vv
-
-# Make
-make
-
-# Run unit tests
-make test_fast
+```bash
+./scripts/modernize_setup.sh
+source .venv-modern/bin/activate
 ```
 
-After each pull it's recommended to run `make` to re-compile internal C++ and protobuf code.
+The setup script creates a Python 3.12 environment, installs checksum-verified
+protoc 35.1, installs the final CPU PyTorch wheel and project extras,
+regenerates protobuf modules, builds `pydipcc`, installs the patched ParlAI
+wheel, and runs smoke tests.
 
-### Downloading model files
+For manual work inside an already prepared environment:
 
-The password for the model files is the following: `dbEmG*yo@fuWzb79cx_pN7.TRm4cqk`. Run `bash bin/download_model_files.sh <PASSWORD>`. This will download and decrypt all relevant model files into `./models`. This might take awhile. Please note the model files have their own license (CC-by-NC 4.0) separate from the code in this repository. More details on this [can be found below](#license-for-model-weights).
-
-### Accessing Cicero's experiment games
-
-JSON data and visualizations for games that Cicero played in are located in [data/cicero_redacted_games](data/cicero_redacted_games). Only conversations with players who have consented to having their dialogue released are included. Please refer to the (separately-licensed) [fairdiplomacy_external](fairdiplomacy_external) subdirectory for details on HTML visualizations.
-
-### Getting started
-
-The front-end for most tasks is `run.py`, which can run various tasks specified by a protobuf config. The config schema can be found at `conf/conf.proto`, and example configs for different tasks can be found in the `conf` folder. This can be used for most tasks (except training parlai models): training no-press models, comparing agents, profiling things, launching an agent on webdip, etc.
-
-The config specification framework, called HeyHi, [is explained here](heyhi/README.md)
-
-A core abstraction is an `Agent`, which is specified by an `Agent` config whose schema lives in `conf/agents.proto`.
-
-### Simulating games between agents
-
-To simulate 1v6 games between a pair of agents, you can run the `compare_agents` task. For example, to play one Cicero agent as Turkey against six full-press imitation agents, you can run
-
-`python run.py --adhoc --cfg conf/c01_ag_cmp/cmp.prototxt Iagent_one=agents/cicero.prototxt Iagent_six=agents/ablations/cicero_imitation_only.prototxt power_one=TURKEY`
-
-If you don't have sufficient memory to load two agents, you can load a single agent in self-play with the `use_shard_agent=1` flag:
-
-`python run.py --adhoc --cfg conf/c01_ag_cmp/cmp.prototxt Iagent_one=agents/cicero.prototxt use_shared_agent=1 power_one=TURKEY`
-
-### Training models in RL
-
-To run the training for Cicero and/or Diplodocus:
-
-```
-python run.py —adhoc —cfg conf/c04_exploit/research_20221001_paper_cicero.prototxt launcher.slurm.num_gpus=256
-
-python run.py —adhoc —cfg conf/c04_exploit/research_20221001_paper_diplodocus_high.prototxt launcher.slurm.num_gpus=256
+```bash
+make protos
+make dipcc
+make test
 ```
 
-The above training commands are designed for running on an appropriately configured Slurm cluster with a fast cross-machine shared filesystem. One can also instead pass `launcher.local.use_local=true` to run them on locally, e.g. on an individual 8-GPU-or-more GPU machine but training may be very slow.
+Useful focused checks:
 
-### Other tasks
-See [here](fairdiplomacy_external) for some separately-licensed code for rendering game jsons with HTML, as well as connecting agents to run on [webdiplomacy.net](https://webdiplomacy.net).
-
-### Supervised training of baseline models
-Supervised training and/or behavioral cloning for various dialogue-conditional models as well as pre-RL baseline dialogue-free models involves some of the scripts in [parlai_diplomacy](parlai_diplomacy) via the ParlAI framework, and on the dialogue-free side, some of the configs [conf/c02_sup_train](conf/c02_sup_train) and [train_sl.py](fairdiplomacy/models/base_strategy_model/train_sl.py). However the dataset of human games and/or dialogue is NOT available here, so the relevant code and configs are likely to be of limited use. They are provided here mostly as documentation for posterity.
-
-However, as mentioned above pre-trained models are available, and with sufficient compute power, re-running the RL on top of these pre-trained models is also possible without any external game data.
-
-
-### Pre-commit hooks
-
-Run `pre-commit install` to install pre-commit hooks that will auto-format python code before commiting it.
-
-Or you can do this manually. Use [black](https://github.com/psf/black) auto-formatter to format all python code.
-For protobufs use `clang-format-8 conf/*.proto -i`.
-
-### Tests
-
-To run tests locally run `make test`.
-
-We have 2 level of tests: fast, unit tests (run with `make test_fast`) and slow, integration tests (run with `make test_integration`).
-The latter aims to use the same entry point as users do, i.e., `run.py` for the HeyHi part and `diplom` for the ParlAi.
-
-We use `pytest` to run and discover tests. Some useful [pytest](https://docs.pytest.org/en/stable/) commands.
-
-To run all tests in your current directory, simply run:
-```
-pytest
+```bash
+python scripts/validate_protobuf.py
+python test_pydipcc.py
+python -m unittest unit_tests.test_full_integration
+python -m pytest path/to/test_file.py -q
 ```
 
-To run tests from a specific file, run:
-```
-pytest <filepath>
-```
+`make test` covers the supported inference and dialogue runtime. Distributed
+self-play has additional native dependencies and is intentionally separate:
 
-To use name-based filtering to run tests, use the flag `-k`. For example, to only run tests with `parlai` in the name, run:
-```
-pytest -k parlai
+```bash
+make test_selfplay
 ```
 
-For verbose testing logs, use `-v`:
-```
-pytest -v -k parlai
-```
+## Why ParlAI is installed separately
 
-To print the output from a test or set of tests, use `-s`; this also allows you to set breakpoints:
-```
-pytest -s
-```
+Cicero depends on a specific 2021 ParlAI source revision. Its original package
+metadata pins packages that cannot coexist with Python 3.12, NumPy 2.4, and
+modern PyTorch. The project therefore:
 
-To view the durations of all tests, run with the flag `--durations=0`, e.g.:
-```
-pytest --durations=0 unit_tests/
-```
+1. installs dialogue dependencies from the `dialogue` extra in
+   [`pyproject.toml`](pyproject.toml);
+2. fetches the exact ParlAI commit;
+3. applies [`patches/parlai-modern-runtime.patch`](patches/parlai-modern-runtime.patch);
+4. installs the patched `1.5.1+cicero1` wheel without the obsolete dependency
+   metadata; and
+5. runs `pip check` and a BART import check.
 
-## License for Code
-The following license, which is also available [here](LICENSE.md), covers the content in this repo *except* for the [fairdiplomacy_external](fairdiplomacy_external) directory. The content of fairdiplomacy_external is separately licenced under a version of the AGPL, see the license file within that directory for details.
+Use:
 
-```
-(covers this repo except for the fairdiplomacy_external directory)
-MIT License
-
-Copyright (c) Meta, Inc. and its affiliates.
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+```bash
+./scripts/install_parlai.sh
 ```
 
-## License for Model Weights
+Do not replace this with a direct `pip install parlai` or an unpatched Git URL.
 
-We are releasing model weights under a separate license: [CC-BY-NC (version 4.0)](https://creativecommons.org/licenses/by-nc/4.0/legalcode). This license is copied into this repository for convenience: [LICENSE_FOR_MODEL_WEIGHTS.txt](LICENSE_FOR_MODEL_WEIGHTS.txt).
+## Cloud and GPU validation
+
+The Modal harness builds the same Ubuntu 24.04 stack with either the CPU or
+cu130 wheel. Keep the Modal CLI in a separate tool environment from the
+project runtime, then run:
+
+```bash
+uvx modal run modal_modern.py::build_and_adjudicate
+uvx modal run modal_modern.py::load_weights
+uvx modal run modal_modern.py::gpu_checks
+```
+
+These gates validate:
+
+- Linux/x86_64 `pydipcc` build and multi-turn adjudication;
+- loading real strategy checkpoints under PyTorch 2.13;
+- a real CUDA 13.0 tensor kernel and strategy-model forward pass; and
+- a ParlAI/BART dialogue forward pass on a GPU.
+
+See [MODAL_VALIDATION.md](MODAL_VALIDATION.md) for prerequisites and acceptance
+criteria. Earlier Python 3.11/cu124 experiments are historical evidence only
+and are not release gates for this stack.
+
+## Model files
+
+Model weights are distributed separately under CC-BY-NC 4.0:
+
+```bash
+bash bin/download_model_files.sh <PASSWORD>
+```
+
+The download is large and produces the local `models/` tree used by agent
+configs. For Modal validation, upload the required files to the
+`cicero-models` Volume before running checkpoint or GPU gates.
+
+## Code map
+
+- [`fairdiplomacy/agents`](fairdiplomacy/agents) — strategic agents and search
+- [`fairdiplomacy/models/base_strategy_model`](fairdiplomacy/models/base_strategy_model)
+  — strategy-model architecture and loading
+- [`parlai_diplomacy`](parlai_diplomacy) — dialogue tasks, agents, and formatting
+- [`dipcc`](dipcc) — C++ game engine and pybind11 bindings
+- [`conf`](conf) — protobuf schemas and experiment/agent configurations
+- [`heyhi`](heyhi) — configuration generation and runtime
+- [`fairdiplomacy/selfplay`](fairdiplomacy/selfplay) — distributed training and self-play
+
+The main task entry point is `run.py`. For example:
+
+```bash
+python run.py --adhoc \
+  --cfg conf/c01_ag_cmp/cmp.prototxt \
+  Iagent_one=agents/cicero.prototxt \
+  Iagent_six=agents/ablations/cicero_imitation_only.prototxt \
+  power_one=TURKEY
+```
+
+The HeyHi configuration system is described in
+[`heyhi/README.md`](heyhi/README.md). Direct `pydipcc` usage is covered in
+[`README_DIRECT_USAGE.md`](README_DIRECT_USAGE.md).
+
+## Documentation
+
+- [Docker guide](DOCKER_GUIDE.md)
+- [dipcc build notes](DIPCC_BUILD_NOTES.md)
+- [dipcc/Python integration](docs/dipcc_integration.md)
+- [modernization status](MODERNIZATION_REPORT.md)
+- [Modal validation gates](MODAL_VALIDATION.md)
+- [Modal oracle serving](MODAL_ORACLE_SERVING.md)
+
+## Data and training scope
+
+Redacted games and visualizations are in
+[`data/cicero_redacted_games`](data/cicero_redacted_games). The human training
+datasets used for the original supervised dialogue and policy training are not
+included. Pretrained weights are available separately, and the original
+Slurm-oriented training configurations remain in `conf/`.
+
+## License
+
+Code is MIT licensed except for
+[`fairdiplomacy_external`](fairdiplomacy_external), which has its own license.
+See [LICENSE.md](LICENSE.md).
+
+Model weights use
+[CC-BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/legalcode); see
+[LICENSE_FOR_MODEL_WEIGHTS.txt](LICENSE_FOR_MODEL_WEIGHTS.txt).

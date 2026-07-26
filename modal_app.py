@@ -1,31 +1,33 @@
-"""
-Run Meta/FAIR Cicero (Diplomacy AI) on a Modal GPU.
+"""Run Meta/FAIR Cicero on the canonical modern Modal GPU image.
 
-This rebuilds the legacy stack for x86_64 + CUDA (the local Mac image is arm64
-and CPU-only). Key choices:
-  * Base: python:3.9-slim (py3.9 is the newest with a torch 1.10.0 wheel).
-  * torch==1.10.0+cu113 (real CUDA wheels exist for x86_64 cp39); the wheel
-    bundles the CUDA runtime and Modal injects the driver — no CUDA base needed.
-  * dipcc / pydipcc are recompiled for x86_64 inside the image (the repo's
-    prebuilt .so is aarch64). The repo's generated conf/*_pb2.py + patched
-    conf_cfgs.py are pure-Python and reused as-is, so no protobuf-from-source.
-  * Models are served from a Modal Volume (`cicero-models`) at /app/models,
-    populated by: modal volume put cicero-models .cicero_model_stage /
-  * On GPU we keep half_precision (the config default) — it's GPU-only and was
-    the thing that broke on CPU.
+All entrypoints reuse ``modal_modern.gpu_image``: Python 3.12, torch 2.13.0
+cu130, protobuf 7.35.1, protoc 35.1, and a pydipcc extension built against the
+matching torch ABI. This module owns runners and model download helpers only;
+the image definition and compatibility validation live in ``modal_modern.py``.
 
 Usage:
   modal run modal_app.py::smoke                 # verify imports + pydipcc + GPU
-  modal run modal_app.py::run_cicero            # full Cicero, Turkey, 1 turn
-  modal run modal_app.py::run_cicero --mode policy --power AUSTRIA --max-turns 1
+  modal run modal_app.py::main                  # full Cicero, Turkey, 1 turn
+  modal run modal_app.py::main --mode policy --power AUSTRIA --max-turns 1
   modal run modal_app.py::serve --tiers searchbot,diplodocus_high   # tactics oracle
 """
+
 import os
 import pathlib
 import secrets
-import subprocess
 
 import modal
+
+from modal_modern import (
+    CUDA_VERSION,
+    PROTOBUF_VERSION,
+    PROTOC_VERSION,
+    PYTHON_VERSION,
+    TORCH_VERSION,
+    VOL,
+    gpu_image,
+    models_volume,
+)
 
 REPO = pathlib.Path(__file__).parent
 
@@ -36,129 +38,27 @@ ORACLE_SRC = pathlib.Path(
     os.environ.get("AGENTIC_ORACLE_DIR", str(REPO.parent / "agentic-diplomacy" / "oracle"))
 )
 
-# Files/dirs that must NOT go into the image build context.
-IGNORE = [
-    ".git", "models", "models_encrypted", ".cicero_model_stage",
-    "diplomacy_experiments", "*.log", "**/*.so", "dipcc_pkg",
-    "dipcc/build", "**/__pycache__", "*.bak", "wandb",
-    # driver/docs/outputs — not needed in the image; excluding keeps edits to
-    # them from invalidating the (slow) nest/dipcc build layers.
-    "modal_app.py", "*.md", "*.txt", "modal_cicero_*.json",
-]
-
-TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
-TORCH_CU_INDEX = "https://download.pytorch.org/whl/cu113"
-TORCH_LIB = "/usr/local/lib/python3.9/site-packages/torch/lib"
-
-# Install a modern patchelf (0.18) for --clear-execstack / --set-rpath.
-PATCHELF = (
-    "wget -q https://github.com/NixOS/patchelf/releases/download/0.18.0/patchelf-0.18.0-x86_64.tar.gz -O /tmp/patchelf.tgz && "
-    "mkdir -p /tmp/pe && tar xzf /tmp/patchelf.tgz -C /tmp/pe && "
-    "cp \"$(find /tmp/pe -type f -name patchelf | head -1)\" /usr/local/bin/patchelf && patchelf --version"
-)
-
-# The exact dependency layer that runs Cicero (mirrors the verified arm64 set,
-# but with CUDA torch). transformers/tokenizers are intentionally omitted —
-# ParlAI uses its own fairseq GPT-2 BPE.
-PIP_DEPS = [
-    "numpy==1.20.3", "protobuf==3.19.1", "pybind11", "cython==0.29.24",
-    "tabulate==0.8.9", "termcolor==1.1.0", "joblib==1.1.0", "pygtrie==2.4.2",
-    "typer==0.4.1", "tqdm==4.62.1", "psutil==5.9.0",
-    "ephemeral-port-reserve==1.1.4", "dacite==1.6.0", "attrs==20.2.0",
-    "colored==1.4.3", "requests==2.27.1", "tensorboard==2.8.0", "pyyaml",
-    "scipy", "sentencepiece", "ftfy", "emoji", "tornado", "wandb", "iopath",
-    "subword-nmt", "scikit-learn", "fairscale==0.4.6",
-    # compatibility pins for ParlAI / Pillow against numpy 1.20 / py3.8
-    "Pillow==9.5.0", "importlib-metadata==4.2.0", "markdown==3.3.2",
-    "urllib3==1.26.18",
-    # CRITICAL: setuptools<60 so torch 1.10 tensorboard import doesn't crash.
-    "setuptools==59.5.0",
-]
-
-image = (
-    # python:3.9-slim is the simplest Modal-compatible base (Modal runs its own
-    # `python -m pip` bootstrap before our steps, so the base MUST already have
-    # python; CUDA base images don't, and add_python can't do 3.9).
-    #
-    # We can't find_package(Torch) against the CUDA wheel without the CUDA
-    # toolkit, which this base lacks. So: build pydipcc against CPU torch
-    # 1.10.0 (no CUDA needed), then swap in torch 1.10.0+cu113 for runtime.
-    # Same torch version => ABI-compatible libtorch_cpu.so/libc10.so, which is
-    # all pydipcc links; we bake the cu113 torch/lib path into pydipcc's rpath.
-    modal.Image.from_registry("python:3.9-slim")
-    .apt_install(
-        "build-essential", "cmake", "git", "wget", "curl",
-        "libgoogle-glog-dev", "libgflags-dev",
-    )
-    .run_commands(PATCHELF)
-    # Build-time torch: CPU build (cmake config doesn't require the CUDA toolkit).
-    .pip_install("torch==1.10.0+cpu", index_url=TORCH_CPU_INDEX)
-    .pip_install(*PIP_DEPS)
-    # ParlAI at the pinned commit, no-deps so it can't move torch off 1.10.
-    .pip_install(
-        "git+https://github.com/facebookresearch/ParlAI.git@5214f42a2058ef335f91f5afe66b2bd9ebfb2fbe",
-        extra_options="--no-deps",
-    )
-    # torch's libs have an executable stack that Modal's gVisor sandbox refuses
-    # to load; clear it so torch imports during the build (and later at runtime).
-    .run_commands(
-        f"find {TORCH_LIB} -name '*.so*' -exec patchelf --clear-execstack {{}} + && "
-        "python -c 'import torch; print(\"build torch\", torch.__version__)'"
-    )
-    # Bring in the repo source (no models / .git / stale .so).
-    .add_local_dir(str(REPO), "/app", copy=True, ignore=IGNORE)
-    # Build the vendored nest pybind11 extension.
-    .run_commands(
-        "cd /app && CXX=c++ pip install thirdparty/github/fairinternal/postman/nest/"
-    )
-    # Compile pydipcc (x86_64) against CPU torch, into fairdiplomacy/.
-    .run_commands(
-        "cd /app/dipcc && rm -rf build && mkdir -p build && cd build && "
-        "PYBIND_DIR=$(python -c 'import pybind11;print(pybind11.get_cmake_dir())') && "
-        "TORCH_CM=$(python -c 'import torch;print(torch.utils.cmake_prefix_path)') && "
-        "echo \"pybind11_DIR=$PYBIND_DIR torch_cmake=$TORCH_CM\" && "
-        "cmake -DCMAKE_BUILD_TYPE=Release "
-        "-DPYTHON_EXECUTABLE=$(which python) "
-        "-Dpybind11_DIR=\"$PYBIND_DIR\" "
-        "-DCMAKE_PREFIX_PATH=\"$TORCH_CM;$PYBIND_DIR\" "
-        ".. && make -j$(nproc) pydipcc && "
-        "cp dipcc/python/pydipcc*.so /app/fairdiplomacy/ && "
-        "ls -la /app/fairdiplomacy/pydipcc*.so"
-    )
-    # Swap in the CUDA torch for runtime, then fix pydipcc's rpath + execstack so
-    # it loads the cu113 torch's libtorch_cpu.so/libc10.so.
-    .pip_install(
-        "torch==1.10.0+cu113", index_url=TORCH_CU_INDEX,
-        extra_options="--no-deps --force-reinstall",
-    )
-    .run_commands(
-        f"find {TORCH_LIB} -name '*.so*' -exec patchelf --clear-execstack {{}} + && "
-        f"patchelf --set-rpath {TORCH_LIB} /app/fairdiplomacy/pydipcc*.so && "
-        "patchelf --clear-execstack /app/fairdiplomacy/pydipcc*.so && "
-        "python -c 'import torch; print(\"runtime torch\", torch.__version__, torch.version.cuda)'"
-    )
-    .env({
-        "PYTHONPATH": "/app",
-        "HH_EXP_DIR": "/app/diplomacy_experiments",
-        "LD_LIBRARY_PATH": TORCH_LIB,
-    })
-)
-
-app = modal.App("cicero")
-models_volume = modal.Volume.from_name("cicero-models", create_if_missing=True)
-VOL = {"/app/models": models_volume}
+# Runners need the dialogue/game closure in addition to the validated base GPU
+# image. Bake it once; never mutate the environment with runtime pip installs.
+RUNNER_RUNTIME_DEPS = ["six", "regex", "sh", "nltk", "websocket-client"]
+image = gpu_image.pip_install(*RUNNER_RUNTIME_DEPS)
+app = modal.App("cicero-modern-runner")
 
 # Lightweight image just for fetching+decrypting weights straight into the
 # Volume from Modal's datacenter (far faster than uploading 36GB from a laptop).
-download_image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .apt_install("gnupg", "wget", "ca-certificates")
+download_image = modal.Image.debian_slim(python_version=PYTHON_VERSION).apt_install(
+    "gnupg", "wget", "ca-certificates"
 )
 MODELS_BASE_URL = "https://dl.fbaipublicfiles.com/diplomacy_cicero/models"
 
 
-@app.function(image=download_image, volumes=VOL, timeout=3600, cpu=8.0,
-              secrets=[modal.Secret.from_name("cicero-gpg")])
+@app.function(
+    image=download_image,
+    volumes=VOL,
+    timeout=3600,
+    cpu=8.0,
+    secrets=[modal.Secret.from_name("cicero-gpg")],
+)
 def fetch_models(relpaths):
     """Download <relpath>.gpg from fbaipublicfiles and decrypt into the Volume.
 
@@ -177,11 +77,12 @@ def fetch_models(relpaths):
             return rel, "skip", os.path.getsize(out) // (1024 * 1024)
         os.makedirs(os.path.dirname(out), exist_ok=True)
         gpg = out + ".gpg"
-        subprocess.run(["wget", "-q", f"{MODELS_BASE_URL}/{rel}.gpg", "-O", gpg],
-                       check=True)
-        subprocess.run(["gpg", "--batch", "--yes", "--passphrase", pw,
-                        "--output", out, "-d", gpg], check=True,
-                       stderr=subprocess.DEVNULL)
+        subprocess.run(["wget", "-q", f"{MODELS_BASE_URL}/{rel}.gpg", "-O", gpg], check=True)
+        subprocess.run(
+            ["gpg", "--batch", "--yes", "--passphrase", pw, "--output", out, "-d", gpg],
+            check=True,
+            stderr=subprocess.DEVNULL,
+        )
         os.remove(gpg)
         return rel, "ok", os.path.getsize(out) // (1024 * 1024)
 
@@ -198,8 +99,10 @@ def fetch_models(relpaths):
 
 
 @app.local_entrypoint()
-def download(relpaths_file: str = "/tmp/cicero_subset_relpaths.txt"):
-    relpaths = [l for l in pathlib.Path(relpaths_file).read_text().split("\n") if l.strip()]
+def download(relpaths_file: str = "/tmp/cicero_subset_relpaths.txt") -> None:
+    relpaths = [
+        line for line in pathlib.Path(relpaths_file).read_text().splitlines() if line.strip()
+    ]
     print(f"fetching {len(relpaths)} model files into volume cicero-models ...")
     n = fetch_models.remote(relpaths)
     print(f"done: {n} files present on volume")
@@ -207,14 +110,11 @@ def download(relpaths_file: str = "/tmp/cicero_subset_relpaths.txt"):
 
 def _run_args(mode: str, power: str, max_turns) -> str:
     """run.py CLI args for a given agent mode (space-joined)."""
-    common = (f"--adhoc --cfg conf/c01_ag_cmp/cmp.prototxt "
-              f"max_turns={max_turns} power_one={power}")
+    common = f"--adhoc --cfg conf/c01_ag_cmp/cmp.prototxt max_turns={max_turns} power_one={power}"
     if mode == "policy":
-        extra = ("Iagent_one=agents/base_strategy_model "
-                 "Iagent_six=agents/base_strategy_model")
+        extra = "Iagent_one=agents/base_strategy_model Iagent_six=agents/base_strategy_model"
     elif mode == "search":
-        extra = ("agent_one.searchbot.n_rollouts=10 "
-                 "agent_one.searchbot.rollouts_cfg.n_threads=8")
+        extra = "agent_one.searchbot.n_rollouts=10 agent_one.searchbot.rollouts_cfg.n_threads=8"
     elif mode == "cicero":
         # half_precision left at the config default (True) — works on GPU.
         # Documented matchup: full Cicero vs six imitation_only (press-capable,
@@ -223,9 +123,11 @@ def _run_args(mode: str, power: str, max_turns) -> str:
         six = os.environ.get("SIX", "agents/ablations/cicero_imitation_only.prototxt")
         # max_msg_iters caps the simulated 24h negotiation so the phase actually
         # terminates (else it generates hundreds of messages).
-        extra = ("Iagent_one=agents/cicero.prototxt "
-                 f"Iagent_six={six} "
-                 f"max_msg_iters={os.environ.get('MSG_ITERS', '30')}")
+        extra = (
+            "Iagent_one=agents/cicero.prototxt "
+            f"Iagent_six={six} "
+            f"max_msg_iters={os.environ.get('MSG_ITERS', '30')}"
+        )
     else:
         raise ValueError(f"unknown mode {mode}")
     return f"{common} {extra}"
@@ -243,8 +145,9 @@ def _stream(proc):
         for line in stream:
             print(line, end="", flush=True)
 
-    threads = [threading.Thread(target=pump, args=(s,), daemon=True)
-               for s in (proc.stdout, proc.stderr)]
+    threads = [
+        threading.Thread(target=pump, args=(s,), daemon=True) for s in (proc.stdout, proc.stderr)
+    ]
     for t in threads:
         t.start()
     code = proc.wait()
@@ -253,34 +156,58 @@ def _stream(proc):
     return code
 
 
-# We drive Cicero with a Modal Sandbox rather than @app.function: the image runs
-# Python 3.9 (required by torch 1.10), but @app.function needs >=3.10. A Sandbox
-# just exec's commands in the image, so no version conflict. GPU + model Volume
-# are attached the same way.
+# Sandboxes preserve the streaming and crash-snapshot behavior needed by the
+# game runners while reusing the same validated modern image as Modal Functions.
 @app.local_entrypoint()
-def smoke():
-    """Verify torch+CUDA, pydipcc, agents import, and the model volume."""
-    check = (
-        "import torch;print('torch',torch.__version__,'cuda',torch.cuda.is_available());"
-        "print('gpu',torch.cuda.get_device_name(0) if torch.cuda.is_available() else None);"
-        "import fairdiplomacy;from fairdiplomacy.pydipcc import Game;"
-        "print('pydipcc OK phase',Game().current_short_phase);"
-        "import heyhi.conf;from fairdiplomacy.agents import build_agent_from_cfg;"
-        "import os;print('models entries',len(os.listdir('/app/models')))"
-    )
-    sb = modal.Sandbox.create(app=app, image=image, gpu="A10G",
-                              timeout=900, volumes=VOL)
+def smoke() -> None:
+    """Strictly verify the modern stack, CUDA kernel execution, and imports."""
+    check = f"""
+import os
+import subprocess
+import sys
+
+import google.protobuf
+import torch
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(str(message))
+
+require(sys.version_info[:2] == (3, 12), sys.version)
+require(torch.__version__ == "{TORCH_VERSION}+cu130", torch.__version__)
+require(torch.version.cuda == "{CUDA_VERSION}", torch.version.cuda)
+require(google.protobuf.__version__ == "{PROTOBUF_VERSION}", google.protobuf.__version__)
+require(
+    subprocess.check_output(["protoc", "--version"], text=True).strip() == "libprotoc {PROTOC_VERSION}",
+    "wrong protoc version",
+)
+require(torch.cuda.is_available(), "Modal GPU is not visible")
+probe = torch.randn((256, 256), device="cuda", dtype=torch.float16)
+require(torch.isfinite(probe @ probe).all().item(), "CUDA matmul produced non-finite values")
+torch.cuda.synchronize()
+import fairdiplomacy
+from fairdiplomacy.pydipcc import Game
+import heyhi.conf
+from fairdiplomacy.agents import build_agent_from_cfg
+require(Game().current_short_phase == "S1901M", "pydipcc returned the wrong opening phase")
+print("stack OK", sys.version, torch.__version__, torch.version.cuda, google.protobuf.__version__)
+print("gpu", torch.cuda.get_device_name(0))
+print("models entries", len(os.listdir("/app/models")))
+"""
+    sb = modal.Sandbox.create(app=app, image=image, gpu="A10G", timeout=900, volumes=VOL)
     try:
         print("sandbox:", sb.object_id)
-        code = _stream(sb.exec("bash", "-lc", f"cd /app && python -c \"{check}\""))
-        print("exit", code)
+        code = _stream(sb.exec("python", "-c", check))
+        if code != 0:
+            raise RuntimeError(f"modern GPU smoke failed with exit code {code}")
     finally:
         sb.terminate()
 
 
 @app.local_entrypoint()
-def game(power: str = "TURKEY", max_year: str = "1907",
-         max_msg_iters: str = "30", max_turns: str = "20"):
+def game(
+    power: str = "TURKEY", max_year: str = "1907", max_msg_iters: str = "30", max_turns: str = "20"
+) -> None:
     """Play a multi-year full-press game (Cicero vs six imitation_only),
     polling the sandbox for the crash-safe output.json.partial every 60s so the
     latest game state is always saved locally even if the run wedges/dies."""
@@ -295,21 +222,28 @@ def game(power: str = "TURKEY", max_year: str = "1907",
         f"power_one={power} max_year={max_year} max_turns={max_turns} "
         f"max_msg_iters={max_msg_iters}"
     )
-    cmd = (f"cd /app && pip install -q six regex sh nltk websocket-client && "
-           f"OMP_NUM_THREADS=8 python run.py {runargs}")
+    cmd = f"cd /app && OMP_NUM_THREADS=8 python run.py {runargs}"
     partial_local = pathlib.Path(f"modal_cicero_game_{power}.partial.json")
     final_local = pathlib.Path(f"modal_cicero_game_{power}.json")
-    pull_partial = ("f=$(find /app/diplomacy_experiments -name output.json.partial "
-                    "2>/dev/null | head -1); [ -n \"$f\" ] && cat \"$f\"")
-    pull_final = ("f=$(ls -t $(find /app/diplomacy_experiments -name output.json) "
-                  "2>/dev/null | head -1); [ -n \"$f\" ] && cat \"$f\"")
+    pull_partial = (
+        "f=$(find /app/diplomacy_experiments -name output.json.partial "
+        '2>/dev/null | head -1); [ -n "$f" ] && cat "$f"'
+    )
+    pull_final = (
+        "f=$(ls -t $(find /app/diplomacy_experiments -name output.json) "
+        '2>/dev/null | head -1); [ -n "$f" ] && cat "$f"'
+    )
 
-    sb = modal.Sandbox.create(app=app, image=image, gpu="A100-80GB",
-                              timeout=14400, volumes=VOL, cpu=8.0, memory=49152)
+    sb = modal.Sandbox.create(
+        app=app, image=image, gpu="A100-80GB", timeout=14400, volumes=VOL, cpu=8.0, memory=49152
+    )
     final = ""
+    code = None
     try:
-        print(f"sandbox {sb.object_id}: game power={power} -> {max_year}, "
-              f"max_msg_iters={max_msg_iters}")
+        print(
+            f"sandbox {sb.object_id}: game power={power} -> {max_year}, "
+            f"max_msg_iters={max_msg_iters}"
+        )
         proc = sb.exec("bash", "-lc", cmd)
         runner = threading.Thread(target=_stream, args=(proc,), daemon=True)
         runner.start()
@@ -324,52 +258,63 @@ def game(power: str = "TURKEY", max_year: str = "1907",
                 partial_local.write_text(snap)
                 try:
                     phases = [p["name"] for p in json.loads(snap)["phases"]]
-                    print(f"[snapshot] {len(snap)}B -> {partial_local.name}; "
-                          f"phases: {phases}")
+                    print(f"[snapshot] {len(snap)}B -> {partial_local.name}; phases: {phases}")
                 except Exception:
                     print(f"[snapshot] {len(snap)}B -> {partial_local.name}")
         runner.join(timeout=10)
+        code = proc.poll()
         final = sb.exec("bash", "-lc", pull_final).stdout.read()
     finally:
         sb.terminate()
+    if code != 0:
+        raise RuntimeError(f"full-press game failed with exit code {code}")
     if final.strip():
         final_local.write_text(final)
         print(f"wrote {final_local} ({len(final)} bytes)")
     elif partial_local.exists():
-        print(f"no final output; latest partial kept at {partial_local}")
+        raise RuntimeError(f"game produced no final output; latest partial is {partial_local}")
+    else:
+        raise RuntimeError("game completed without final or partial output")
 
 
 @app.local_entrypoint()
-def main(mode: str = "cicero", power: str = "", max_turns: str = "1"):
+def main(mode: str = "cicero", power: str = "", max_turns: str = "1") -> None:
     if not power:
         power = "TURKEY" if mode == "cicero" else "AUSTRIA"
     runargs = _run_args(mode, power, max_turns)
-    # Deps missing from the baked image's x86_64 transitive closure; installed
-    # at runtime during bring-up (fold into PIP_DEPS once stable).
-    extra_pip = "six regex sh nltk websocket-client"
-    cmd = (f"cd /app && pip install -q {extra_pip} && "
-           f"PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128 "
-           f"OMP_NUM_THREADS=8 python run.py {runargs}")
+    cmd = (
+        "cd /app && PYTORCH_ALLOC_CONF=max_split_size_mb:128 "
+        f"OMP_NUM_THREADS=8 python run.py {runargs}"
+    )
     # Full Cicero (agent_one ~20GB VRAM) + six imitation agents (own dialogue/
     # order models) OOMs a 24GB A10G; A100-80GB fits both with headroom.
-    sb = modal.Sandbox.create(app=app, image=image, gpu="A100-80GB",
-                              timeout=3600, volumes=VOL, cpu=8.0, memory=49152)
+    sb = modal.Sandbox.create(
+        app=app, image=image, gpu="A100-80GB", timeout=3600, volumes=VOL, cpu=8.0, memory=49152
+    )
     game_json = ""
     try:
         print(f"sandbox {sb.object_id}: mode={mode} power={power} turns={max_turns}")
         code = _stream(sb.exec("bash", "-lc", cmd))
-        print("run.py exit:", code)
-        cat = sb.exec("bash", "-lc",
-                      "f=$(ls -t $(find /app/diplomacy_experiments -name output.json) "
-                      "2>/dev/null | head -1); [ -n \"$f\" ] && cat \"$f\"")
+        if code != 0:
+            raise RuntimeError(f"run.py failed with exit code {code}")
+        cat = sb.exec(
+            "bash",
+            "-lc",
+            "f=$(ls -t $(find /app/diplomacy_experiments -name output.json) "
+            '2>/dev/null | head -1); [ -n "$f" ] && cat "$f"',
+        )
         game_json = cat.stdout.read()
-        cat.wait()
+        cat_code = cat.wait()
+        if cat_code != 0:
+            raise RuntimeError("run.py succeeded but no output.json was found")
     finally:
         sb.terminate()
     if game_json.strip():
         outp = pathlib.Path(f"modal_cicero_{mode}_output.json")
         outp.write_text(game_json)
         print("wrote", outp, len(game_json), "bytes")
+    else:
+        raise RuntimeError("run.py produced an empty output.json")
 
 
 # --- tactics oracle: a warm HTTP front for the agentic-diplomacy MCP bridge ----
@@ -378,7 +323,7 @@ def main(mode: str = "cicero", power: str = "", max_turns: str = "1"):
 # front (oracle/server/oracle_server.py --transport http) over a Modal tunnel.
 # The agentic-diplomacy MCP registry points an `http` tier at the printed URL +
 # token (OracleClient.modal(url, token)). This is Option A of TACTICS_SERVING_
-# DESIGN.md: simplest, warm GPU, no Python-3.9 jail issue (a Sandbox just exec's).
+# DESIGN.md: simplest warm-GPU path, with a Sandbox streaming the server process.
 #
 # Per-tier config: prototxt + value ckpt + search-budget overrides. Checkpoint
 # names mirror what the cicero-models Volume holds; adjust to the actual volume
@@ -465,9 +410,17 @@ def _oracle_cmd(tiers, port, token, rollouts=0):
     rollouts>0 caps each search tier's n_rollouts (cheap smokes); 0 = config default.
     """
     args = [
-        "python", "-u", "/opt/oracle/oracle_server.py",
-        "--transport", "http", "--host", "0.0.0.0", "--port", str(port),
-        "--device", "cuda",
+        "python",
+        "-u",
+        "/opt/oracle/oracle_server.py",
+        "--transport",
+        "http",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        str(port),
+        "--device",
+        "cuda",
     ]
     for tier in tiers:
         preset = TIER_PRESETS[tier]
@@ -478,30 +431,46 @@ def _oracle_cmd(tiers, port, token, rollouts=0):
             args += ["--override", f"{tier}:{ov}"]
         if rollouts and _rollout_key(tier):
             args += ["--override", f"{tier}:{_rollout_key(tier)}={rollouts}"]
-    # Token via env so it never lands in `ps`/logs. The extra pip deps are the
-    # same ParlAI runtime closure the main/game entrypoints install — required for
-    # full-press (dialogue) tiers, harmless for no-press.
+    # Runner dependencies are baked into ``image``; execution never mutates the
+    # environment with pip.
     quoted = " ".join(args)
-    return (
-        "cd /app && pip install -q six regex sh nltk websocket-client && "
-        f"PYTHONPATH=/app ORACLE_TOKEN={token} OMP_NUM_THREADS=8 {quoted}"
-    )
+    return f"cd /app && PYTHONPATH=/app ORACLE_TOKEN={token} OMP_NUM_THREADS=8 {quoted}"
 
 
 # Standard S1901M opening in Cicero format (emitted by `dip dump-positions`),
 # used by the inline `serve --smoke` check.
 _OPENING_GAME = {
-    "id": "smoke", "is_full_press": False, "map": "standard",
-    "phases": [{"messages": {}, "name": "S1901M", "orders": {}, "state": {
-        "centers": {"AUSTRIA": ["BUD", "TRI", "VIE"], "ENGLAND": ["EDI", "LON", "LVP"],
-                    "FRANCE": ["BRE", "MAR", "PAR"], "GERMANY": ["BER", "KIE", "MUN"],
-                    "ITALY": ["NAP", "ROM", "VEN"], "RUSSIA": ["MOS", "SEV", "STP", "WAR"],
-                    "TURKEY": ["ANK", "CON", "SMY"]},
-        "name": "S1901M",
-        "units": {"AUSTRIA": ["A BUD", "A VIE", "F TRI"], "ENGLAND": ["A LVP", "F EDI", "F LON"],
-                  "FRANCE": ["A MAR", "A PAR", "F BRE"], "GERMANY": ["A BER", "A MUN", "F KIE"],
-                  "ITALY": ["A ROM", "A VEN", "F NAP"], "RUSSIA": ["A MOS", "A WAR", "F SEV", "F STP/SC"],
-                  "TURKEY": ["A CON", "A SMY", "F ANK"]}}}],
+    "id": "smoke",
+    "is_full_press": False,
+    "map": "standard",
+    "phases": [
+        {
+            "messages": {},
+            "name": "S1901M",
+            "orders": {},
+            "state": {
+                "centers": {
+                    "AUSTRIA": ["BUD", "TRI", "VIE"],
+                    "ENGLAND": ["EDI", "LON", "LVP"],
+                    "FRANCE": ["BRE", "MAR", "PAR"],
+                    "GERMANY": ["BER", "KIE", "MUN"],
+                    "ITALY": ["NAP", "ROM", "VEN"],
+                    "RUSSIA": ["MOS", "SEV", "STP", "WAR"],
+                    "TURKEY": ["ANK", "CON", "SMY"],
+                },
+                "name": "S1901M",
+                "units": {
+                    "AUSTRIA": ["A BUD", "A VIE", "F TRI"],
+                    "ENGLAND": ["A LVP", "F EDI", "F LON"],
+                    "FRANCE": ["A MAR", "A PAR", "F BRE"],
+                    "GERMANY": ["A BER", "A MUN", "F KIE"],
+                    "ITALY": ["A ROM", "A VEN", "F NAP"],
+                    "RUSSIA": ["A MOS", "A WAR", "F SEV", "F STP/SC"],
+                    "TURKEY": ["A CON", "A SMY", "F ANK"],
+                },
+            },
+        }
+    ],
 }
 
 
@@ -512,7 +481,8 @@ def _rpc(url, token, method, params, timeout=600):
 
     body = json.dumps({"id": 1, "method": method, "params": params}).encode()
     req = urllib.request.Request(
-        url.rstrip("/") + "/rpc", data=body,
+        url.rstrip("/") + "/rpc",
+        data=body,
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
     )
     with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -530,29 +500,53 @@ def _inline_smoke(url, token, tiers, full_press):
     info = _rpc(url, token, "info", {})
     print("[smoke][info]", json.dumps(info))
     for tier in tiers:
-        orders = _rpc(url, token, "get_orders", {"game_json": game, "power": "FRANCE", "tier": tier})
+        orders = _rpc(
+            url, token, "get_orders", {"game_json": game, "power": "FRANCE", "tier": tier}
+        )
+        if not orders.get("orders"):
+            raise RuntimeError(f"get_orders({tier}) returned no orders")
         print(f"[smoke][get_orders][{tier}] FRANCE -> {orders['orders']}")
-        try:
-            pol = _rpc(url, token, "policy", {"game_json": game, "power": "FRANCE", "tier": tier, "top_k": 3})
-            print(f"[smoke][policy][{tier}] top3 -> {[(p['orders'], round(p['prob'],3)) for p in pol['policy']]}")
-        except Exception as e:
-            print(f"[smoke][policy][{tier}] skipped: {e}")
-        try:
-            val = _rpc(url, token, "value", {"game_json": game, "tier": tier})
-            print(f"[smoke][value][{tier}] -> {json.dumps({k: round(v,4) for k,v in val['value'].items()})}")
-        except Exception as e:
-            print(f"[smoke][value][{tier}] skipped: {e}")
+        pol = _rpc(
+            url,
+            token,
+            "policy",
+            {"game_json": game, "power": "FRANCE", "tier": tier, "top_k": 3},
+        )
+        if not pol.get("policy"):
+            raise RuntimeError(f"policy({tier}) returned no candidates")
+        print(
+            f"[smoke][policy][{tier}] top3 -> "
+            f"{[(p['orders'], round(p['prob'], 3)) for p in pol['policy']]}"
+        )
+        val = _rpc(url, token, "value", {"game_json": game, "tier": tier})
+        if not val.get("value"):
+            raise RuntimeError(f"value({tier}) returned no values")
+        print(
+            f"[smoke][value][{tier}] -> "
+            f"{json.dumps({k: round(v, 4) for k, v in val['value'].items()})}"
+        )
         if full_press:
-            msg = _rpc(url, token, "generate_message",
-                       {"game_json": game, "power": "FRANCE", "recipient": "ENGLAND", "tier": tier})
+            msg = _rpc(
+                url,
+                token,
+                "generate_message",
+                {"game_json": game, "power": "FRANCE", "recipient": "ENGLAND", "tier": tier},
+            )
             print(f"[smoke][message][{tier}] FRANCE->{msg.get('recipient')}: {msg.get('body')!r}")
     print("[smoke] ✅ PASSED")
 
 
 @app.local_entrypoint()
-def serve(tiers: str = "searchbot", port: int = 8000, gpu: str = "A10G",
-          timeout: int = 3600, token: str = "", smoke: bool = False,
-          full_press: bool = False, rollouts: int = 0):
+def serve(
+    tiers: str = "searchbot",
+    port: int = 8000,
+    gpu: str = "A10G",
+    timeout: int = 3600,
+    token: str = "",
+    smoke: bool = False,
+    full_press: bool = False,
+    rollouts: int = 0,
+) -> None:
     """Serve the agentic-diplomacy oracle HTTP front over a Modal tunnel.
 
     tiers:   comma-separated subset of TIER_PRESETS to load into one process
@@ -568,21 +562,32 @@ def serve(tiers: str = "searchbot", port: int = 8000, gpu: str = "A10G",
     import urllib.request
 
     tier_list = [t.strip() for t in tiers.split(",") if t.strip()]
+    if not tier_list:
+        raise ValueError("tiers must select at least one oracle tier")
     unknown = [t for t in tier_list if t not in TIER_PRESETS]
     if unknown:
         raise ValueError(f"unknown tiers {unknown}; choose from {sorted(TIER_PRESETS)}")
     token = token or secrets.token_urlsafe(24)
 
     sb = modal.Sandbox.create(
-        app=app, image=_serving_image(), gpu=gpu, volumes=VOL,
-        encrypted_ports=[port], timeout=timeout, cpu=8.0, memory=49152,
+        app=app,
+        image=_serving_image(),
+        gpu=gpu,
+        volumes=VOL,
+        encrypted_ports=[port],
+        timeout=timeout,
+        cpu=8.0,
+        memory=49152,
     )
     try:
         proc = sb.exec("bash", "-lc", _oracle_cmd(tier_list, port, token, rollouts))
         # Stream server logs in the background so a crash's traceback is visible.
         for s in (proc.stdout, proc.stderr):
-            threading.Thread(target=lambda st: [print(line, end="", flush=True) for line in st],
-                             args=(s,), daemon=True).start()
+            threading.Thread(
+                target=lambda st: [print(line, end="", flush=True) for line in st],
+                args=(s,),
+                daemon=True,
+            ).start()
         url = sb.tunnels()[port].url
         print("=" * 72)
         print(f"oracle serving tiers={tier_list} gpu={gpu}")
@@ -599,8 +604,7 @@ def serve(tiers: str = "searchbot", port: int = 8000, gpu: str = "A10G",
         while time.time() < deadline:
             rc = proc.poll()
             if rc is not None:
-                print(f"!! oracle process exited rc={rc} (see logs above)", flush=True)
-                return
+                raise RuntimeError(f"oracle process exited with code {rc}; see streamed logs")
             if not healthy:
                 try:
                     with urllib.request.urlopen(url.rstrip("/") + "/health", timeout=10) as r:
@@ -613,5 +617,7 @@ def serve(tiers: str = "searchbot", port: int = 8000, gpu: str = "A10G",
                         _inline_smoke(url, token, tier_list, full_press)
                         return
             time.sleep(5)
+        if not healthy:
+            raise TimeoutError(f"oracle did not become healthy within {timeout} seconds")
     finally:
         sb.terminate()

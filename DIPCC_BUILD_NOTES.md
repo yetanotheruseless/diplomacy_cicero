@@ -1,212 +1,134 @@
-# Building the Diplomacy Cicero C++ Components (dipcc)
+# Building `dipcc` and `pydipcc`
 
-This document provides detailed information about building the C++ components of the Diplomacy Cicero project, specifically the dipcc module which powers the core game logic.
+`dipcc` is the C++20 Diplomacy engine. `pydipcc` is its pybind11 extension,
+imported as `fairdiplomacy.pydipcc`.
 
-> **Note:** For a detailed explanation of how the dipcc C++ library integrates with the Python codebase through fairdiplomacy.pydipcc, see [docs/dipcc_integration.md](docs/dipcc_integration.md) and [docs/module_dependencies.md](docs/module_dependencies.md).
+## Supported build contract
 
-## Directory Structure
+- Ubuntu 24.04
+- Python 3.12 plus development headers
+- PyTorch 2.13.0 (`+cpu` or `+cu130`)
+- CMake 3.28+
+- Ninja
+- GCC/G++ 13
+- pybind11 3.0.4
+- glog and gflags development packages
 
-The dipcc C++ code has a nested directory structure:
+The extension links against the active Python and PyTorch installations. Build
+it only after installing the final Torch variant for the target image.
 
-- `dipcc/`: Top-level directory
-  - `dipcc/cc/`: C++ implementation files
-  - `dipcc/pybind/`: Python binding code
-  - `dipcc/profiling/`: Profiling utilities
-  - `dipcc/python/`: Python module structure
+## Recommended build
 
-## Build Requirements
-
-- GCC 9.4+ with C++17 support
-- CMake 3.10+
-- Python 3.7+
-- pybind11 library
-- Protocol Buffers 3.19.1 (exact version)
-- PyTorch libraries
-
-## Build Process
-
-The build process involves several steps that must be performed in the correct order:
-
-1. **Install system dependencies**
-
-   ```bash
-   apt-get update && apt-get install -y \
-       build-essential cmake gcc-9 g++-9 python3.8-dev \
-       libgoogle-glog-dev pybind11-dev
-   ```
-
-2. **Configure compiler alternatives**
-
-   ```bash
-   update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 90
-   update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-9 90
-   update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-9 90
-   update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-9 90
-   ```
-
-3. **Install Python dependencies**
-
-   ```bash
-   pip install pybind11 numpy torch
-   ```
-
-4. **Build the C++ library**
-
-   ```bash
-   cd dipcc
-   mkdir -p build && cd build
-   pybind11_DIR=$(python3 -c "import pybind11; print(pybind11.get_cmake_dir())")
-   cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$pybind11_DIR ..
-   make -j2 pydipcc
-   ```
-
-5. **Create the necessary Python module structure**
-
-   ```bash
-   mkdir -p /path/to/fairdiplomacy
-   cp /path/to/dipcc/build/dipcc/python/pydipcc*.so /path/to/fairdiplomacy/
-   ```
-
-6. **Configure the Python import**
-
-   Create a `fairdiplomacy/__init__.py` file with the following content:
-
-   ```python
-   #!/usr/bin/env python
-   import sys, os
-   import importlib.util
-
-   # Make the pydipcc module available
-   spec = importlib.util.spec_from_file_location(
-       "pydipcc", 
-       os.path.join(os.path.dirname(__file__), "pydipcc.cpython-XX-ARCH-OS.so")
-   )
-   if spec:
-       pydipcc = importlib.util.module_from_spec(spec)
-       spec.loader.exec_module(pydipcc)
-       sys.modules["fairdiplomacy.pydipcc"] = pydipcc
-   ```
-
-## Common Issues and Solutions
-
-### 1. Nested Directory Structure
-
-The repository has a nested structure where C++ files are in `dipcc/dipcc/cc/` instead of `dipcc/cc/`. This can cause issues with CMake finding the correct files. To fix this:
+The Dockerfile supplies the complete toolchain:
 
 ```bash
-mkdir -p /path/to/dipcc/cc /path/to/dipcc/pybind
-cp -r /path/to/dipcc/dipcc/cc/* /path/to/dipcc/cc/
-cp -r /path/to/dipcc/dipcc/pybind/* /path/to/dipcc/pybind/
-cp -r /path/to/dipcc/dipcc/profiling /path/to/dipcc/
+docker build --target cpu-build -t diplomacy-cicero:cpu .
+docker run --rm diplomacy-cicero:cpu python test_pydipcc.py
 ```
 
-### 2. pybind11 Not Found
-
-If CMake cannot find pybind11, set the pybind11_DIR environment variable:
+For an already prepared local environment:
 
 ```bash
-pybind11_DIR=$(python3 -c "import pybind11; print(pybind11.get_cmake_dir())")
-export pybind11_DIR
+source .venv-modern/bin/activate
+make protos
+PYDIPCC_OUT_DIR="$PWD/fairdiplomacy" \
+N_DIPCC_JOBS=4 \
+./dipcc/compile.sh
 ```
 
-### 3. Python Linking Issues
+`dipcc/compile.sh` configures a fresh Ninja build using the active `python`,
+PyTorch's CMake prefix, and pybind11's CMake directory. The default target is
+`pydipcc`.
 
-If you encounter Python linking errors in the build process:
-
-```
-undefined reference to `PyErr_SetString'
-undefined reference to `_Py_Dealloc'
-```
-
-Make sure your build system is properly linking against the Python libraries. The CMakeLists.txt should include:
-
-```cmake
-find_package(PythonInterp 3 REQUIRED)
-find_package(PythonLibs 3 REQUIRED)
-include_directories(${PYTHON_INCLUDE_DIRS})
-```
-
-### 4. Memory Issues During Compilation
-
-The C++ compilation can be memory-intensive. If you're running out of memory during the build:
+Useful overrides:
 
 ```bash
-# Limit compilation to a smaller number of parallel jobs
-make -j2 pydipcc
+MODE=Debug N_DIPCC_JOBS=2 ./dipcc/compile.sh
+DIPCC_TARGET=profile_dipcc ./dipcc/compile.sh
 ```
 
-## Testing the Build
+## Build layout
 
-To test if the build was successful, you can run a simple Python script:
-
-```python
-import sys
-sys.path.insert(0, "/path/to/project")
-
-from fairdiplomacy import pydipcc
-print("pydipcc imported successfully")
-
-game = pydipcc.Game()
-print("Game created successfully")
-print("Current phase:", game.get_current_phase())
+```text
+dipcc/
+├── CMakeLists.txt
+├── compile.sh
+├── dipcc/cc/          C++ engine
+├── dipcc/pybind/      Python bindings
+├── dipcc/profiling/   profiling executables
+└── build/             generated Ninja/CMake output
 ```
 
-## Available API Methods
+When `PYDIPCC_OUT_DIR` is set, CMake writes the extension directly to that
+directory. The supported project build writes it to `fairdiplomacy/`.
 
-Successfully imported pydipcc module will have the following components:
-
-- `pydipcc.Game`: Main game class for representing and manipulating Diplomacy games
-- `pydipcc.PhaseData`: Class representing data for a single game phase
-- `pydipcc.CFRStats` and `pydipcc.SinglePowerCFRStats`: For counterfactual regret minimization
-- `pydipcc.ThreadPool`: For parallel processing
-- Various utility functions for encoding and decoding game states
-
-## Docker Build
-
-To build dipcc in a Docker container, the Dockerfile includes all the necessary dependencies and build steps. We provide two Dockerfiles:
-
-- `Dockerfile`: Streamlined build for production use
-- `Dockerfile.phased`: Detailed step-by-step build with testing at each phase (useful for debugging)
-
-### Using Docker Compose (Recommended)
-
-The easiest way to use the Docker environment is with Docker Compose:
+## Validation
 
 ```bash
-# Build and start the container
-docker-compose up -d
-
-# Access the running container
-docker-compose exec diplomacy bash
-
-# Test if dipcc is working correctly
-docker-compose exec diplomacy python /app/test_pydipcc.py
+python -c \
+  "from fairdiplomacy import pydipcc; print(pydipcc.Game().current_short_phase)"
+python test_pydipcc.py
+python -m unittest unit_tests.test_full_integration
+python -m pytest dipcc/python/test_thread_pool.py -q
 ```
 
-### Manual Docker Usage
+The first command should print `S1901M`.
 
-You can also build and run the Docker container manually:
+## Troubleshooting
+
+### CMake finds the wrong Python
+
+Activate the Python 3.12 environment before configuring and remove stale build
+state:
 
 ```bash
-# Build the main Docker image
-docker build -t diplomacy_cicero .
-
-# Run the container with the current directory mounted
-docker run -it -v $(pwd):/app diplomacy_cicero bash
-
-# For debugging: build the phased version
-docker build -t diplomacy_cicero_phased -f Dockerfile.phased .
-docker run -it diplomacy_cicero_phased bash
+source .venv-modern/bin/activate
+rm -rf dipcc/build
+./dipcc/compile.sh
 ```
 
-### Verifying the Build
-
-Once inside the Docker container, you can test if the dipcc build was successful:
+The configuration must report the same interpreter returned by:
 
 ```bash
-# Run the test script
-python /app/test_pydipcc.py
-
-# Or try importing and using the module directly
-python -c "from fairdiplomacy import pydipcc; game = pydipcc.Game(); print(game.get_state())"
+command -v python
+python -c "import sys; print(sys.executable)"
 ```
+
+### Torch is not found
+
+Install the final Torch wheel first and verify:
+
+```bash
+python -c \
+  "import torch; print(torch.__version__, torch.utils.cmake_prefix_path)"
+```
+
+Do not compile against a CPU wheel and then replace it with a CUDA wheel.
+
+### glog/gflags are not found
+
+On Ubuntu 24.04, install `libgoogle-glog-dev` and `libgflags-dev`. The CMake
+build requires their config-mode imported targets.
+
+### Build runs out of memory
+
+Reduce parallelism:
+
+```bash
+N_DIPCC_JOBS=1 ./dipcc/compile.sh
+```
+
+### Extension cannot be imported
+
+Confirm that exactly one architecture/interpreter-compatible extension exists:
+
+```bash
+find fairdiplomacy -maxdepth 1 -name 'pydipcc*.so' -print
+python -c "from fairdiplomacy import pydipcc; print(pydipcc.__file__)"
+```
+
+Rebuild whenever Python, PyTorch variant, architecture, or compiler ABI
+changes.
+
+See [docs/dipcc_integration.md](docs/dipcc_integration.md) for the runtime
+boundary.

@@ -69,7 +69,7 @@ class MessageHistoryFlattener(BaseFormatHelper):
         Replace redacted tokens with a special [REDACTED] token
         """
         if self.use_generic_redacted_token:
-            msg = re.sub("\\[\d+\\]", REDACTED_TOKEN, msg)
+            msg = re.sub(r"\[\d+\]", REDACTED_TOKEN, msg)
 
         return msg
 

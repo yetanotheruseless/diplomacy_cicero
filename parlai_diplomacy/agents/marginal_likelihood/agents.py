@@ -69,7 +69,10 @@ class BartMarginalClassifierAgent(BartClassifierAgent):
 
         with PathManager.open(path, "rb") as f:
             states = torch.load(
-                f, map_location=lambda cpu, _: cpu, pickle_module=parlai.utils.pickle
+                f,
+                map_location=lambda cpu, _: cpu,
+                pickle_module=parlai.utils.pickle,
+                weights_only=False,
             )
         if "model" in states:
             self.load_state_dict(states["model"])

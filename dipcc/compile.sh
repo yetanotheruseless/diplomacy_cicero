@@ -6,19 +6,21 @@
 # LICENSE file in the root directory of this source tree.
 #
 
-MODE=${MODE:-Release}
+MODE="${MODE:-Release}"
+N_DIPCC_JOBS="${N_DIPCC_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)}"
+DIPCC_TARGET="${DIPCC_TARGET:-pydipcc}"
 
-pushd $(dirname $0)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}"
 
-# Remove some lingering files that might be around from prior to building in build
-rm -f CMakeCache.txt
-rm -f cmake_install.cmake
-rm -f MakeFile
-rm -rf CMakeFiles/
+PYBIND11_DIR="$(python -m pybind11 --cmakedir)"
 
-mkdir -p build
-pushd build
-cmake -DCMAKE_BUILD_TYPE=$MODE .. && make -j ${N_DIPCC_JOBS:-}
-popd >/dev/null
-
-popd >/dev/null
+cmake \
+    --fresh \
+    -S . \
+    -B build \
+    -G Ninja \
+    -DCMAKE_BUILD_TYPE="${MODE}" \
+    -DPython_EXECUTABLE="$(command -v python)" \
+    -Dpybind11_DIR="${PYBIND11_DIR}"
+cmake --build build --target "${DIPCC_TARGET}" --parallel "${N_DIPCC_JOBS}"

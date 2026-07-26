@@ -61,7 +61,7 @@ class CkptSyncer:
         if versions:
             *_, (last_version, last_path) = versions
             logging.info("Initializing model averaging with %s %s", last_version, last_path)
-            model = torch.load(last_path, map_location="cpu")["model"]
+            model = torch.load(last_path, map_location="cpu", weights_only=False)["model"]
             self._last_versioned_model = model
 
     def get_all_versions(self) -> List[Tuple[ModelVersion, str]]:
@@ -124,7 +124,7 @@ class CkptSyncer:
         """Load model state if needed and return latest model version."""
         version, path = self.get_last_version()
         if version != last_version:
-            pickle = torch.load(path, map_location="cpu")
+            pickle = torch.load(path, map_location="cpu", weights_only=False)
             torch_module.load_state_dict(pickle["model"])
             self._last_loaded_model_meta = pickle.get("meta", {})
         return version
@@ -133,7 +133,7 @@ class CkptSyncer:
         """Load meta from model state and return latest model version."""
         version, path = self.get_last_version()
         if version != last_version:
-            pickle = torch.load(path, map_location="cpu")
+            pickle = torch.load(path, map_location="cpu", weights_only=False)
             self._last_loaded_model_meta = pickle.get("meta", {})
         return version
 

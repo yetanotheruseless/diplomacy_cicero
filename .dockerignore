@@ -1,50 +1,78 @@
-# Git
-.git
+# Version control and CI metadata
+.git/
 .gitignore
+.gitattributes
+.github/
+.doctrack/
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-env/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Virtual environments
-.env
-.venv
-venv/
-ENV/
-
-# Models directory (mounted as a volume)
-models/
-
-# IDE files
+# Local editor and operating-system state
+.DS_Store
 .idea/
 .vscode/
 *.swp
 *.swo
 
-# Build artifacts
+# Python caches, virtual environments, and packaging output
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.env
+.env.*
+!.env.example
+.venv/
+.venv-*/
+venv/
+env/
+ENV/
+.eggs/
+*.egg
+*.egg-info/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+.installed.cfg
+
+# Test, type-check, and lint caches
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.hypothesis/
+.mypy_cache/
+.pytest_cache/
+.pyright/
+.ruff_cache/
+
+# Native and generated build artifacts. The image regenerates these itself.
 *.o
 *.a
+*.so
 *.dylib
-# Encrypted model weights (~99GB) - never needed in image
-models_encrypted/
+conf/*_pb2.py
+conf/*_pb2.pyi
+conf/*_cfgs.py
+conf/*_cfgs.pyi
 dipcc_pkg/
-*.bak
+
+# Model weights are mounted at runtime and must never enter the build context.
+models/
+models_encrypted/
 .cicero_model_stage/
+
+# Local run output and diagnostics
+*.bak
+*.log
+*.partial.json
+game_state.json
+
+# Compose configuration is not needed by the image build.
+docker-compose.yml
+docker-compose.*.yml

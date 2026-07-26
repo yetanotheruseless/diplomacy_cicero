@@ -1665,7 +1665,7 @@ def _pad_last_dims(tensor, partial_new_shape, pad_value):
         partial_new_shape
     )
     new_tensor = tensor.new_full(new_shape, pad_value)
-    new_tensor[[slice(None, D) for D in tensor.shape]].copy_(tensor)
+    new_tensor[tuple(slice(None, dimension) for dimension in tensor.shape)].copy_(tensor)
     return new_tensor
 
 

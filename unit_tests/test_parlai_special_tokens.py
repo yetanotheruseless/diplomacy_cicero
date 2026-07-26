@@ -18,13 +18,13 @@ class TestSpecialTokens(unittest.TestCase):
     def test_special_tokens(self):
         v1_toks = st.load_special_tokens()
         # Ensure this list is immutable
-        self.assertEquals(v1_toks, st.SPECIAL_TOKENS_V1)
+        self.assertEqual(v1_toks, st.SPECIAL_TOKENS_V1)
         # Ensure this list is sorted correctly
-        self.assertEquals(v1_toks, sorted(v1_toks, key=len, reverse=True))
+        self.assertEqual(v1_toks, sorted(v1_toks, key=len, reverse=True))
 
         v2_toks = st.load_special_tokens_v2()
         # Ensure this list is immutable
-        self.assertEquals(
+        self.assertEqual(
             v2_toks,
             [
                 "[REDACTED]",
@@ -139,4 +139,4 @@ class TestSpecialTokens(unittest.TestCase):
             ],
         )
         # Ensure this list is sorted correctly
-        self.assertEquals(v2_toks, sorted(v2_toks, key=len, reverse=True))
+        self.assertEqual(v2_toks, sorted(v2_toks, key=len, reverse=True))

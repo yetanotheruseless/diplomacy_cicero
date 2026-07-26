@@ -1,56 +1,93 @@
-#!/bin/bash -e
+#!/usr/bin/env bash
 #
-# Reproducible setup for the Python-3.11 / modern-torch modernization spike.
-# Builds a uv-managed venv, regenerates protobuf, builds pydipcc, and runs the
-# evidence checks documented in MODERNIZATION_REPORT.md.
+# Reproducible local CPU build for the canonical runtime stack:
+# Python 3.12, torch 2.13.0, protobuf 7.35.1, and protoc 35.1.
 #
-# macOS/arm64, CPU-only. See MODERNIZATION_REPORT.md for what each step proves
-# and which steps need an x86_64+CUDA container to fully validate.
+# The Modal CPU and GPU images follow the same steps independently, with the GPU
+# image installing its final cu130 wheel before compiling pydipcc.
+
+set -euo pipefail
 
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
-VENV="$ROOT/.venv-modern"
+readonly ROOT
+readonly VENV="$ROOT/.venv-modern"
+readonly PYTHON_VERSION="3.12"
+readonly TORCH_VERSION="2.13.0"
+readonly PROTOBUF_VERSION="7.35.1"
+readonly PROTOC_VERSION="35.1"
+readonly PIP_VERSION="26.1.2"
+readonly SETUPTOOLS_VERSION="83.0.0"
+readonly WHEEL_VERSION="0.47.0"
 
-echo "== 1. uv venv (Python 3.11) =="
-uv venv --python 3.11 "$VENV"
+echo "== 1. uv venv (Python ${PYTHON_VERSION}) =="
+uv venv --python "$PYTHON_VERSION" "$VENV"
 # shellcheck disable=SC1091
 source "$VENV/bin/activate"
 
-echo "== 2. modern Python deps =="
+echo "== 2. pinned protoc ${PROTOC_VERSION} =="
+PROTOC_VERSION="$PROTOC_VERSION" PROTOC_PREFIX="$VENV" ./scripts/install_protoc.sh
+
+echo "== 3. final CPU torch + editable runtime extras =="
+if [[ "$(uname -s)" == "Linux" ]]; then
+  uv pip install "torch==${TORCH_VERSION}+cpu" \
+    --index-url https://download.pytorch.org/whl/cpu
+else
+  uv pip install "torch==${TORCH_VERSION}"
+fi
 uv pip install \
-  "protobuf>=5.0" "mypy-protobuf>=3.5" \
-  "torch>=2.2" "numpy>=1.26,<2.3" \
-  "pybind11>=2.10" \
-  tabulate joblib pyarrow tqdm termcolor colored pygtrie \
-  dacite attrs python-dateutil psutil \
-  iopath requests scikit-learn subword-nmt "setuptools<81" \
-  pytest pyyaml
-# ParlAI at Cicero's pinned commit (no-deps; deps installed above as needed)
-uv pip install --no-deps \
-  "git+https://github.com/facebookresearch/ParlAI.git@5214f42a2058ef335f91f5afe66b2bd9ebfb2fbe"
+  "pip==${PIP_VERSION}" "setuptools==${SETUPTOOLS_VERSION}" "wheel==${WHEEL_VERSION}" \
+  --upgrade
+python -m pip install --no-cache-dir --editable ".[build,dialogue,dev]"
+python -m pip check
 
-echo "== 3. regenerate + heyhi-patch protobuf (modern protoc) =="
-rm -f conf/*_pb2.py conf/*_pb2.pyi conf/*_cfgs.py conf/*_cfgs.pyi
-rm -rf conf/__pycache__
-protoc conf/*.proto --python_out=./ --mypy_out=./
-PYTHONPATH="$ROOT" python heyhi/bin/patch_protos.py \
-  conf/agents_pb2.py conf/common_pb2.py conf/misc_pb2.py conf/conf_pb2.py
+# Install the pinned source through the repository's compatibility patch. Its
+# wheel metadata and pkg_resources usage are modernized before installation.
+./scripts/install_parlai.sh
 
-echo "== 4. build pydipcc (macOS/arm64 against modern torch + Homebrew glog) =="
-# Homebrew glog/gflags (modern glog needs GLOG_USE_GLOG_EXPORT, handled in CMake)
-brew list glog >/dev/null 2>&1 || brew install glog gflags
-export CONDA_PREFIX=/opt/homebrew
-export CMAKE_PREFIX_PATH="/opt/homebrew/opt/glog:/opt/homebrew/opt/gflags:$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')"
-( cd dipcc && rm -rf build && mkdir build && cd build \
-    && cmake -DCMAKE_BUILD_TYPE=Release .. \
-    && make pydipcc )
-cp dipcc/build/dipcc/python/pydipcc.cpython-*-darwin.so fairdiplomacy/
+python - <<PY
+import importlib.metadata
+import sys
 
-echo "== 5. evidence checks =="
-PYTHONPATH="$ROOT" python -m pytest heyhi/tests/test_conf.py -q || true
+import google.protobuf
+import numpy
+import parlai
+import torch
+
+if sys.version_info[:2] != (3, 12):
+    raise RuntimeError(sys.version)
+if torch.__version__.split("+", 1)[0] != "${TORCH_VERSION}":
+    raise RuntimeError(torch.__version__)
+if google.protobuf.__version__ != "${PROTOBUF_VERSION}":
+    raise RuntimeError(google.protobuf.__version__)
+if numpy.__version__ != "2.4.6":
+    raise RuntimeError(numpy.__version__)
+for package, expected in {
+    "pip": "${PIP_VERSION}",
+    "setuptools": "${SETUPTOOLS_VERSION}",
+    "wheel": "${WHEEL_VERSION}",
+    "parlai": "1.5.1+cicero1",
+}.items():
+    actual = importlib.metadata.version(package)
+    if actual != expected:
+        raise RuntimeError(f"{package}: expected {expected}, got {actual}")
+print("versions:", sys.version.split()[0], torch.__version__, google.protobuf.__version__)
+PY
+
+echo "== 4. canonical protobuf generation =="
+make protos
+
+echo "== 5. build pydipcc =="
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  brew list glog >/dev/null 2>&1 || brew install glog gflags
+fi
+PYDIPCC_OUT_DIR="$ROOT/fairdiplomacy" N_DIPCC_JOBS="${N_DIPCC_JOBS:-4}" ./dipcc/compile.sh
+
+echo "== 6. evidence checks =="
+PYTHONPATH="$ROOT" python -m pytest heyhi/tests/test_conf.py -q
 PYTHONPATH="$ROOT" python - <<'PY'
 import torch, importlib.util, glob
-so = glob.glob("fairdiplomacy/pydipcc.cpython-*-darwin.so")[0]
+so = glob.glob("fairdiplomacy/pydipcc*.so")[0]
 spec = importlib.util.spec_from_file_location("pydipcc", so)
 pydipcc = importlib.util.module_from_spec(spec); spec.loader.exec_module(pydipcc)
 g = pydipcc.Game(); g.process()

@@ -171,7 +171,7 @@ class TrainerState:
         cls, filename: pathlib.Path, default: "TrainerState", device: str = "cpu"
     ) -> "TrainerState":
         logging.info("Loading TrainerState from %s", filename)
-        data = torch.load(filename, map_location=device)
+        data = torch.load(filename, map_location=device, weights_only=False)
         self = cls.from_dict(data, default, device)
         logging.info("Loaded state from %s", filename)
         logging.info(

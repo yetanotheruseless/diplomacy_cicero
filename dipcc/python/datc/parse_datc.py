@@ -90,7 +90,7 @@ def parse_orders(s, override_orders={}):
 def parse_tests_from_html(html_path):
     with open(html_path, "r") as f:
         html = f.read()
-    splits = re.compile("""a name="[6]\.[A-Z]\.[0-9]+">""").split(html)
+    splits = re.compile(r"""a name="[6]\.[A-Z]\.[0-9]+">""").split(html)
     test_strs = splits[1:-1]
     parsed_tests = []
     for s in test_strs:

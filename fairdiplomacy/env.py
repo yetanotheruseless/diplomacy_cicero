@@ -391,7 +391,9 @@ class Env:
             logging.warning(
                 "Restoring eval process from checkpoint: %s", partial_out_name + STATE_SUFFIX
             )
-            self.load_state_dict(torch.load(partial_out_name + STATE_SUFFIX))
+            self.load_state_dict(
+                torch.load(partial_out_name + STATE_SUFFIX, weights_only=False)
+            )
             logging.warning("New phase: %s", self.game.get_current_phase())
         while not self.game.is_game_done:
             if max_turns and self.turn_id >= max_turns:

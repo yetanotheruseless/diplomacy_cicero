@@ -1,118 +1,153 @@
-# CLAUDE.md
+# Development Guide
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This fork has one supported runtime. Do not restore, preserve, or add a second
+compatibility path for the original Cicero environment.
 
-## Setup & Environment
-- **Recommended setup**: Use Docker (works on all platforms)
-  - Build image: `./scripts/docker_build.sh`
-  - Run container: `./scripts/docker_run.sh`
-- Alternative conda setup: `./scripts/setup_conda_env.sh` (not recommended on macOS)
-- Alternative venv setup: `./scripts/setup_env.sh` (uses uv) or `./scripts/setup_env_pip.sh` (uses pip)
-- **Note**: This project was primarily developed for Linux/Ubuntu. Docker provides the most reliable environment.
+## Runtime contract
 
-## System Requirements
-- Docker (recommended)
-- Alternatively:
-  - Protocol Buffer Compiler (protoc) version 3.19.1 exactly
-  - CMake 3.10+
-  - GCC 9.4+ with C++17 support
-  - Python 3.7 or 3.8
+| Component | Required |
+|---|---|
+| OS | Ubuntu 24.04 |
+| Python | 3.12 |
+| PyTorch | 2.13.0 |
+| CPU variant | `2.13.0+cpu` |
+| GPU variant | `2.13.0+cu130` |
+| CUDA | 13.0 userspace; current base images use 13.0.3 |
+| NumPy | 2.4.6 |
+| protobuf runtime | 7.35.1 |
+| protoc | 35.1 |
+| pybind11 | 3.0.4 |
+| ParlAI | patched `1.5.1+cicero1` from commit `5214f42…` |
+| native build | C++20, CMake 3.28+, Ninja, GCC 13 |
 
-## Diplomacy Cicero Build Process
-See [DIPCC_BUILD_NOTES.md](./DIPCC_BUILD_NOTES.md) for detailed instructions on building the C++ components.
+CPU and CUDA are variants of this one contract. Compile `pydipcc` only after
+the final PyTorch variant is installed.
 
-### Build Dependencies
-1. **Protocol Buffers**: Used for configuration and serialization
-   - Version 3.19.1 must be built from source to avoid compatibility issues
-   - Required for parsing `.proto` files in the `conf/` directory
-   
-2. **dipcc**: C++ implementation of the Diplomacy game logic
-   - Located in the `dipcc/` directory
-   - Compiles to a shared library
-   - Provides Python bindings via pybind11
-   
-3. **fairdiplomacy**: Python module that depends on dipcc
-   - Imports dipcc as `fairdiplomacy.pydipcc`
-   
-4. **parlai_diplomacy**: Modified ParlAI framework for dialogue generation
+## Canonical setup paths
 
-### Build Order
-The correct build sequence is:
-1. Install system dependencies
-2. Build protobuf 3.19.1 from source
-3. Compile `.proto` files to Python modules
-4. Compile dipcc C++ library and Python bindings
-5. Install Python dependencies
-6. Install the Python package
+Docker is authoritative:
 
-### Common Issues
-- Protocol buffer syntax errors with protobuf versions other than 3.19.1
-- Import errors between dipcc and fairdiplomacy.pydipcc
-- C++ compilation failures due to GCC version incompatibility
-- CUDA/GPU acceleration configuration issues
+```bash
+docker build --target cpu-build -t diplomacy-cicero:cpu .
+docker run --rm diplomacy-cicero:cpu \
+  ./scripts/verify_full_build.sh --accelerator cpu
 
-## Build & Testing Commands
-- Compile and build: `make compile`
-- Compile protobuf only: `make protos_basic`
-- Compile dipcc only: `cd dipcc && ./compile.sh`
-- Run all tests: `make test`
-- Run fast tests: `make test_fast`
-- Run single test: `python -m pytest path/to/test.py::test_function -v`
-- Run tests with filter: `pytest -k pattern`
-- Run tests with output: `pytest -s`
-- Show test durations: `pytest --durations=0`
-- Check types: `./bin/pyright_local.py`
+docker build --target cuda-runtime -t diplomacy-cicero:cuda .
+docker run --rm --gpus all diplomacy-cicero:cuda \
+  ./scripts/verify_full_build.sh --accelerator cuda --require-gpu
+```
 
-## Code Style Guidelines
-- **Python**: 3.7+ with static typing
-- **C++**: C++17 with pybind11 for Python bindings
-- **Formatting**: Use black with line length of 99 (`black . --line-length=99`)
-- **Imports**: Standard first, third-party next, project imports last, separated by blank lines
-- **Naming**: snake_case for variables/functions, PascalCase for classes
-- **Error handling**: Use explicit exception handling with descriptive messages
-- **Pre-commit**: Run `pre-commit install` to auto-format code before commits
-- **Protobuf**: Format with `clang-format-8 conf/*.proto -i`
-- **Documentation**: Use docstrings for functions and methods, especially for public APIs
-- **Testing**: Write pytest tests with descriptive names in unit_tests/ directory
+Local CPU development uses:
 
-## Next Steps for Docker and Build Improvements
+```bash
+./scripts/modernize_setup.sh
+source .venv-modern/bin/activate
+```
 
-1. **Test Cross-Platform Compatibility**:
-   - Test the build on both x86_64 and ARM64 architectures
-   - Modify module loading to dynamically detect platform-specific `.so` files
-   - Add platform-specific build options and documentation
+Do not direct users to distro protobuf packages, unpatched ParlAI, Conda setup,
+deleted Dockerfiles, or old Python/CUDA environments.
 
-2. **Optimize Memory Usage**:
-   - Experiment with Docker build memory limits and compilation flags
-   - Create a multi-stage build to reduce final image size
-   - Add resource requirement documentation for different build configurations
+## Build order
 
-3. **Strengthen Protobuf Handling**:
-   - Create validation tests for protobuf compilation correctness
-   - Document protobuf version requirements more prominently
-   - Add better error handling for protobuf version mismatches
+The ordering is part of the ABI and generated-code contract:
 
-4. **Improve Validation**:
-   - Expand test_pydipcc.py to validate more functionality
-   - Add tests for model loading and game state manipulation
-   - Create specific tests for Python-C++ integration points
+1. Install the final CPU or cu130 PyTorch 2.13 wheel.
+2. Install `.[build,dialogue,dev]`.
+3. Install checksum-verified protoc 35.1 with
+   `scripts/install_protoc.sh`.
+4. Run `make protos`.
+5. Compile `pydipcc` with `dipcc/compile.sh`.
+6. Install patched ParlAI with `scripts/install_parlai.sh`.
+7. Run `python -m pip check` and the runtime verifier.
 
-5. **Document Integration Points**:
-   - Document the relationship between dipcc and fairdiplomacy.pydipcc more clearly
-   - Create a visual diagram of module dependencies
-   - Add examples of correct import paths and usage
+Generated `conf/*_pb2.py`, `conf/*_pb2.pyi`, and `conf/*_cfgs.py` files must be
+regenerated together. Never hand-edit generated files.
 
-6. **Refine Docker Workflow**:
-   - Consolidate the regular and phased Dockerfiles
-   - Add CI pipeline instructions for automated building and testing
-   - Create Docker Compose profiles for different use cases
+## Commands
 
-7. **Create Release Process**:
-   - Document how to create versioned Docker images
-   - Add tagging conventions for built images
-   - Test integration with model weight downloading
+```bash
+# Supported inference/dialogue build and tests
+make compile
+make test
 
-8. **Deployment Instructions**:
-   - Add detailed instructions for deploying in production environments
-   - Document resource requirements (memory, CPU, GPU)
-   - Include performance optimization guidelines
+# Focused checks
+make protos
+make validate_protos
+make dipcc
+python test_pydipcc.py
+python -m unittest unit_tests.test_full_integration
+python -m pytest path/to/test_file.py -q
+
+# Optional distributed self-play subsystem
+make test_selfplay
+
+# Style/type checks
+ruff check .
+ruff format --check .
+./bin/pyright_local.py
+```
+
+`make test` intentionally covers the supported runtime and thread-pool tests.
+The distributed self-play C++ target has additional dependencies and remains
+an explicit opt-in gate.
+
+## Cloud gates
+
+Use an isolated Modal CLI environment so its own protobuf requirement does not
+modify the Cicero runtime:
+
+```bash
+uvx modal run modal_modern.py::build_and_adjudicate
+uvx modal run modal_modern.py::load_weights
+uvx modal run modal_modern.py::gpu_checks
+```
+
+The three commands are the current B5, B1, and B2/B3 gates respectively. Do not
+cite Python 3.11, cu124, or protoc 25 results as validation for the current
+stack.
+
+## Code map
+
+- `fairdiplomacy/agents/` — search, rollout, and agent orchestration
+- `fairdiplomacy/models/base_strategy_model/` — model definitions and checkpoint loading
+- `fairdiplomacy/selfplay/` — distributed training and self-play
+- `parlai_diplomacy/` — dialogue tasks, formatting, and ParlAI agents
+- `dipcc/` — C++ game engine and Python bindings
+- `conf/` — protobuf schemas and generated config modules
+- `heyhi/` — configuration generation/runtime
+- `modal_modern.py` — exact-stack cloud validation images and gates
+
+## Engineering conventions
+
+- Target Python 3.12 and add type annotations to changed functions.
+- Format Python with Ruff using the repository configuration.
+- Keep imports grouped as standard library, third-party, then project imports.
+- Use descriptive errors and comments that explain why.
+- Add focused pytest coverage for behavior changes.
+- Preserve unrelated work in the shared worktree.
+- Use `apply_patch` for hand edits and never overwrite concurrent changes.
+
+## Native and checkpoint caveats
+
+- `pydipcc` links against PyTorch libraries and must be rebuilt when the
+  interpreter, PyTorch variant, toolchain, or architecture changes.
+- Real Cicero checkpoints are trusted full pickles. Their loader must explicitly
+  use `torch.load(..., weights_only=False)` under modern PyTorch.
+- The pinned ParlAI source metadata is intentionally replaced by the project's
+  `dialogue` extra. `scripts/install_parlai.sh` verifies the patched distribution
+  version and BART import.
+- Host-native macOS can be useful for CPU development, but release claims must
+  be demonstrated in Ubuntu 24.04 containers or the matching Modal image.
+
+## Documentation
+
+When the runtime changes, update these together:
+
+- `README.md`
+- `CLAUDE.md`
+- `MODERNIZATION_REPORT.md`
+- `MODAL_VALIDATION.md`
+- Docker and dipcc guides linked from the README
+
+Historical experiments may remain only when they are clearly labeled
+historical and not presented as supported commands or release evidence.

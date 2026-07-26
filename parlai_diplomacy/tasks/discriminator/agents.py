@@ -335,7 +335,7 @@ def change_entities(
     # while a ratio of 0.5 will discard one of the matches.
     # `math.ceil` will ensure at least 1 match will be selected.
     num_replacements = math.ceil(len(matches) * corruption_ratio)
-    sampled_matches = random.sample(matches.keys(), num_replacements)  # sample w/o replacement
+    sampled_matches = random.sample(list(matches), num_replacements)  # sample w/o replacement
     # in the loop below, the dictionary `matches` is "flattened" into a single list.
     # for e.g the matches dictionary below:
     # {
