@@ -7,52 +7,66 @@ LICENSE file in the root directory of this source tree.
 #pragma once
 
 #include <atomic>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <utility>
 
-#include <grpc++/grpc++.h>
-
-#include "rpc.grpc.pb.h"
-#include "rpc.pb.h"
+#include <grpcpp/grpcpp.h>
 
 #include "computationqueue.h"
+#include "rpc.grpc.pb.h"
 
 namespace postman {
+
 class Server {
-  typedef std::function<TensorNest(const TensorNest &)> Function;
+  using Function =
+      std::function<TensorNest(const TensorNest&)>;
 
   class ServiceImpl final : public RPC::Service {
    public:
-    grpc::Status bind(const std::string &name, Function &&function);
+    void bind(std::string name, Function function);
 
    private:
-    virtual grpc::Status Call(
-        grpc::ServerContext *context,
-        grpc::ServerReaderWriter<CallResponse, CallRequest> *stream) override;
+    grpc::Status Call(
+        grpc::ServerContext* context,
+        grpc::ServerReaderWriter<
+            CallResponse, CallRequest>* stream) override;
 
     std::map<std::string, Function> functions_;
   };
 
  public:
-  Server(const std::string &address) : address_(address), server_(nullptr) {}
+  explicit Server(std::string address)
+      : address_(std::move(address)) {}
+  ~Server();
+
+  Server(const Server&) = delete;
+  Server& operator=(const Server&) = delete;
 
   void run();
   void wait();
-  void stop();
+  void stop() noexcept;
 
-  bool running() { return running_.load(); }
-  int port() { return port_.load(); }
+  bool running() const noexcept { return running_.load(); }
+  int port() const noexcept { return port_.load(); }
 
-  void bind(const std::string &name, Function &&function);
-
-  void bind_queue(const std::string &name,
-                  std::shared_ptr<ComputationQueue> queue);
-  void bind_queue_batched(const std::string &name,
-                          std::shared_ptr<ComputationQueue> queue);
+  void bind(std::string name, Function function);
+  void bind_queue(
+      const std::string& name,
+      std::shared_ptr<ComputationQueue> queue);
+  void bind_queue_batched(
+      const std::string& name,
+      std::shared_ptr<ComputationQueue> queue);
 
  private:
   const std::string address_;
   ServiceImpl service_;
+  mutable std::mutex state_mutex_;
   std::unique_ptr<grpc::Server> server_;
-
+  bool started_ = false;
   std::atomic_bool running_ = false;
   std::atomic_int port_ = 0;
 };

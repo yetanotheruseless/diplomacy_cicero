@@ -69,6 +69,13 @@ jobs:
           docker run --rm diplomacy-cicero:cpu-test \
             ./scripts/verify_full_build.sh --accelerator cpu
 
+      - name: Build and test Postman tensor RPC
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm diplomacy-cicero:cpu-test \
+            ./scripts/build_postman.sh
+
   cuda-runtime:
     name: CUDA 13.0 runtime image
     runs-on: ubuntu-24.04

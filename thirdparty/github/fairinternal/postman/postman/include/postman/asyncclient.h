@@ -6,10 +6,20 @@ LICENSE file in the root directory of this source tree.
 */
 #pragma once
 
+#include <condition_variable>
+#include <cstddef>
+#include <deque>
 #include <future>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include <ATen/ATen.h>
-#include <grpc++/grpc++.h>
+#include <grpcpp/grpcpp.h>
 #include <nest.h>
 
 #include "rpc.grpc.pb.h"
@@ -17,131 +27,97 @@ LICENSE file in the root directory of this source tree.
 typedef nest::Nest<at::Tensor> TensorNest;
 
 namespace postman {
+
 class AsyncClient {
  public:
+  static constexpr std::size_t kDefaultMaxOutstandingCalls = 64;
+  static constexpr std::size_t kDefaultMaxConcurrentCalls =
+      kDefaultMaxOutstandingCalls;
+
   class Streams {
-    template <typename T>
-    class Queue {
-     public:
-      bool push(T* item) {
-        std::unique_lock<std::mutex> lock(mu_);
-        if (closed()) {
-          return false;
-        }
-        deque_.push_back(std::unique_ptr<T>(item));
-        return true;
-      }
-
-      std::unique_ptr<T> pop() {
-        std::unique_ptr<T> result;
-        std::unique_lock<std::mutex> lock(mu_);
-        if (!closed() && !deque_.empty()) {
-          result = std::move(deque_.front());
-          deque_.pop_front();
-        }
-        return result;
-      }
-
-      std::deque<std::unique_ptr<T>>& close() {
-        std::unique_lock<std::mutex> lock(mu_);
-        closed_.store(true);
-        return deque_;
-      }
-
-      bool closed() const { return closed_.load(); }
-
-     private:
-      std::mutex mu_;
-      std::atomic_bool closed_ = false;
-      std::deque<std::unique_ptr<T>> deque_;
-    };
-
-    /// Async gRPC idiom, see
-    ///   https://grpc.io/docs/tutorials/async/helloasync-cpp/
-    class CallData {
-     public:
-      CallData(RPC::Stub* stub, grpc::CompletionQueue* cq,
-               Queue<CallData>* queue, std::promise<grpc::Status> result)
-          : stream_(stub->PrepareAsyncCall(&context_, cq)),
-            queue_(queue),
-            result_(std::move(result)) {}
-
-      std::future<TensorNest> call(const std::string& function,
-                                   const TensorNest& inputs);
-
-      void finish() {
-        GPR_ASSERT(status_ == PROCESS);
-
-        // We cannot simply call Finish() it seems, the
-        // server will only wake up from Read() by WritesDone().
-        // This isn't quite clear from the gRPC docs for
-        // grpc_impl::internal::ClientAsyncStreamingInterface::Finish.
-        status_ = WRITES_DONE;
-        stream_->WritesDone(this);
-      }
-
-      void proceed();
-
-     private:
-      grpc::ClientContext context_;
-      std::unique_ptr<grpc::ClientAsyncReaderWriterInterface<
-          postman::CallRequest, postman::CallResponse>>
-          stream_;
-      Queue<CallData>* queue_;
-
-      enum Status { CREATE, PROCESS, WRITE, READ, WRITES_DONE, FINISH };
-      Status status_ = CREATE;
-
-      CallRequest request_;
-      CallResponse response_;
-
-      std::promise<TensorNest> promise_;
-      std::promise<grpc::Status> result_;
-      grpc::Status result_value_;
-    };
-
    public:
-    Streams(RPC::Stub* stub);
-
+    Streams(
+        std::shared_ptr<RPC::Stub> stub,
+        std::size_t max_concurrent_calls,
+        std::size_t max_outstanding_calls);
     ~Streams();
 
-    /// Make an async call.
-    ///
-    /// \param function Name of the function to call.
-    /// \param inputs The inputs of the function to call.
-    ///
-    /// This method will start a new (bidi streaming) call when
-    /// none is available and re-use existing calls when they are.
-    /// Calls undergo a lifecycle of CREATE->PROCESS->WRITE->READ.
-    /// From READ they can go back into PROCESS or into
-    /// WRITES_DONE->FINISH. From PROCESS (idle) they can also go
-    /// into WRITES_DONE. See CallData class above for details.
-    ///
-    /// TODO(heiner): Consider limiting the number of parallel calls,
-    /// blocking (or failing?) when none are available.
-    ///
-    /// \return A future for the return value.
-    std::future<TensorNest> call(const std::string& function,
-                                 const TensorNest& inputs);
+    Streams(const Streams&) = delete;
+    Streams& operator=(const Streams&) = delete;
 
-    void close();
+    /// Submit one asynchronous RPC.
+    ///
+    /// Calls execute on a fixed worker pool. A call is rejected when the
+    /// configured outstanding-call limit is reached so request floods cannot
+    /// create unbounded native threads or queued tensor payloads. If a server
+    /// function waits for a full batch, max_concurrent_calls must be at least
+    /// that batch size. The defaults make every accepted call concurrent.
+    std::future<TensorNest> call(
+        const std::string& function,
+        const TensorNest& inputs);
+
+    /// Reject new calls, cancel queued and in-flight work, and join workers.
+    ///
+    /// This operation is thread-safe and idempotent.
+    void close() noexcept;
 
    private:
-    RPC::Stub* stub_;
-    grpc::CompletionQueue cq_;
+    struct Task {
+      explicit Task(CallRequest request)
+          : request(std::move(request)),
+            context(std::make_shared<grpc::ClientContext>()) {}
 
-    std::unique_ptr<std::thread> polling_thread_;
-    Queue<CallData> queue_;
-    std::vector<std::future<grpc::Status>> stati_;
+      CallRequest request;
+      std::shared_ptr<grpc::ClientContext> context;
+      std::promise<TensorNest> promise;
+    };
+
+    enum class Phase {
+      kOpen,
+      kClosing,
+      kClosed,
+    };
+
+    struct State {
+      std::mutex mutex;
+      std::condition_variable work_available;
+      Phase phase = Phase::kOpen;
+      std::deque<std::shared_ptr<Task>> pending;
+      std::unordered_map<
+          grpc::ClientContext*, std::shared_ptr<Task>>
+          active;
+      const std::size_t max_outstanding_calls;
+
+      explicit State(std::size_t max_outstanding_calls)
+          : max_outstanding_calls(max_outstanding_calls) {}
+    };
+
+    static void worker_loop(
+        const std::shared_ptr<State>& state,
+        const std::shared_ptr<RPC::Stub>& stub);
+    static void reject_task(
+        const std::shared_ptr<Task>& task,
+        const std::string& message) noexcept;
+
+    std::shared_ptr<RPC::Stub> stub_;
+    std::shared_ptr<State> state_;
+    std::mutex close_mutex_;
+    std::vector<std::thread> workers_;
   };
 
-  AsyncClient(const std::string& address) : address_(address) {}
+  explicit AsyncClient(
+      std::string address,
+      std::size_t max_concurrent_calls =
+          kDefaultMaxConcurrentCalls,
+      std::size_t max_outstanding_calls =
+          kDefaultMaxOutstandingCalls);
 
-  std::shared_ptr<AsyncClient::Streams> connect(int deadline_sec = 60);
+  std::shared_ptr<Streams> connect(int deadline_sec = 60) const;
 
  private:
   const std::string address_;
-  std::unique_ptr<RPC::Stub> stub_;
-};  // namespace postman
+  const std::size_t max_concurrent_calls_;
+  const std::size_t max_outstanding_calls_;
+};
 
 }  // namespace postman

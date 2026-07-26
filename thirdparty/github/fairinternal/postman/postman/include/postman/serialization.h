@@ -22,21 +22,24 @@ LICENSE file in the root directory of this source tree.
 
 #pragma once
 
-#include <nest.h>
+#include <cstdint>
 
 #include <ATen/ATen.h>
+#include <nest.h>
 
 #include "rpc.pb.h"
 
 typedef nest::Nest<at::Tensor> TensorNest;
 
 namespace postman {
+inline constexpr int kMaxMessageBytes = 512 * 1024 * 1024;
+
 namespace detail {
 // Fill an ArrayNest proto from a TensorNest.
 void fill_proto_from_tensornest(postman::ArrayNest* nest_pb,
                                 const TensorNest& nest);
 
 // Create a TensorNest from an ArrayNest proto.
-TensorNest nest_proto_to_tensornest(postman::ArrayNest* nest_pb);
+TensorNest nest_proto_to_tensornest(const postman::ArrayNest& nest_pb);
 }  // namespace detail
 }  // namespace postman

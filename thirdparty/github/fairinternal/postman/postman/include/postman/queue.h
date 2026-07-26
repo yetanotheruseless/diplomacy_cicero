@@ -6,10 +6,12 @@ LICENSE file in the root directory of this source tree.
 */
 #pragma once
 
+#include <condition_variable>
+#include <cstdint>
 #include <deque>
 #include <mutex>
-#include <optional>
 #include <stdexcept>
+#include <utility>
 
 namespace postman {
 struct QueueClosed : public std::runtime_error {
@@ -21,19 +23,22 @@ struct QueueClosed : public std::runtime_error {
 template <typename T>
 class Queue {
  public:
-  Queue(int64_t max_size) : max_size_(max_size) {}
+  explicit Queue(int64_t max_size) : max_size_(max_size) {
+    if (max_size <= 0) {
+      throw std::invalid_argument("Queue max_size must be greater than zero");
+    }
+  }
 
   int64_t size() const {
-    std::unique_lock<std::mutex> lock(mu_);
-    return deque_.size();
+    std::scoped_lock lock(mu_);
+    return static_cast<int64_t>(deque_.size());
   }
 
   void enqueue(T item) {
     {
       std::unique_lock<std::mutex> lock(mu_);
-      while (!closed_ && deque_.size() >= max_size_) {
-        can_dequeue_.wait(lock);
-      }
+      can_enqueue_.wait(
+          lock, [this]() { return closed_ || deque_.size() < max_size_; });
       if (closed_) {
         throw QueueClosed("Enqueue to closed queue");
       }
@@ -44,12 +49,26 @@ class Queue {
     can_dequeue_.notify_one();
   }
 
+  bool try_enqueue(T item) {
+    {
+      std::scoped_lock lock(mu_);
+      if (closed_) {
+        throw QueueClosed("Enqueue to closed queue");
+      }
+      if (deque_.size() >= max_size_) {
+        return false;
+      }
+      deque_.push_back(std::move(item));
+    }
+
+    can_dequeue_.notify_one();
+    return true;
+  }
+
   T dequeue() {
     T item = [&]() {
       std::unique_lock<std::mutex> lock(mu_);
-      while (!closed_ && deque_.empty()) {
-        can_dequeue_.wait(lock);
-      }
+      can_dequeue_.wait(lock, [this]() { return closed_ || !deque_.empty(); });
 
       if (closed_) throw QueueClosed("Dequeue from closed queue");
 
@@ -62,28 +81,29 @@ class Queue {
   }
 
   bool is_closed() const {
-    // TODO: Consider using atomic_bool closed_ and don't acquire lock here?
-    std::unique_lock<std::mutex> lock(mu_);
+    std::scoped_lock lock(mu_);
     return closed_;
   }
 
-  void close() {
+  std::deque<T> close() noexcept {
+    std::deque<T> items;
     {
-      std::unique_lock<std::mutex> lock(mu_);
+      std::scoped_lock lock(mu_);
       if (closed_) {
-        throw QueueClosed("Queue was closed already");
+        return items;
       }
       closed_ = true;
-      deque_.clear();
+      items = std::move(deque_);
     }
     can_dequeue_.notify_all();
     can_enqueue_.notify_all();
+    return items;
   }
 
  private:
   mutable std::mutex mu_;
 
-  const uint64_t max_size_;
+  const std::size_t max_size_;
 
   std::condition_variable can_dequeue_;
   std::condition_variable can_enqueue_;

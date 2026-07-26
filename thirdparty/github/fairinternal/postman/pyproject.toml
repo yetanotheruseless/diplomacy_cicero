@@ -1,0 +1,34 @@
+[build-system]
+requires = [
+    "pybind11==3.0.4",
+    "scikit-build-core==1.0.3",
+    "torch==2.13.0",
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "postman"
+version = "0.3.0"
+description = "Tensor RPC transport for Cicero distributed self-play"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "MIT"
+dependencies = ["torch==2.13.0"]
+
+[tool.scikit-build]
+minimum-version = "1.0"
+cmake.version = ">=3.28"
+cmake.source-dir = "postman"
+cmake.build-type = "Release"
+ninja.version = ">=1.11"
+wheel.packages = ["postman/python/postman"]
+build.targets = ["rpc", "postman_native_test", "postman_headers_test"]
+
+[tool.scikit-build.cmake.define]
+BUILD_TESTING = "ON"
+CICERO_GRPC_SOURCE_DIR = { env = "CICERO_GRPC_SOURCE_DIR" }
+CICERO_POSTMAN_WARNINGS_AS_ERRORS = "ON"
+
+[tool.ruff]
+line-length = 99
+target-version = "py312"

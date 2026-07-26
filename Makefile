@@ -1,4 +1,4 @@
-.PHONY: all compile compile_selfplay clean clean_protos dipcc protos selfplay check_deps protos_basic validate_protos test test_fast test_thread_pool test_selfplay test_selfplay_rela
+.PHONY: all compile compile_selfplay clean clean_protos dipcc postman protos selfplay check_deps protos_basic validate_protos test test_fast test_postman test_thread_pool test_selfplay test_selfplay_rela
 
 all: compile
 
@@ -14,9 +14,9 @@ check_deps:
 # Build the supported inference and dialogue runtime.
 compile: | check_deps protos dipcc
 
-# The optional RELA prioritized-replay extension is kept out of the inference
-# build. Postman RPC remains a separate dependency; see docs/selfplay_runtime.md.
-compile_selfplay: | compile selfplay
+# Distributed self-play adds RELA prioritized replay and Postman tensor RPC.
+# Both stay out of the inference-only build.
+compile_selfplay: | compile selfplay postman
 
 dipcc:
 	@echo "Building dipcc..."
@@ -28,6 +28,10 @@ dipcc_debug:
 selfplay:
 	@echo "Building the optional RELA prioritized-replay extension..."
 	./scripts/build_selfplay.sh --build-only
+
+postman:
+	@echo "Building the Postman tensor RPC extension..."
+	./scripts/build_postman.sh --build-only
 
 # Compile modern protobuf modules, type stubs, and heyhi frozen-config wrappers.
 protos:
@@ -59,12 +63,16 @@ test_selfplay_rela: | selfplay
 	@echo "Running RELA prioritized-replay native and Python tests"
 	./scripts/build_selfplay.sh --test-only
 
+test_postman: | postman
+	@echo "Running Postman tensor RPC native, wheel, and Python tests"
+	./scripts/build_postman.sh --test-only
+
 test_selfplay: | compile_selfplay
 	@echo "Running RELA prioritized-replay native and Python tests"
 	./scripts/build_selfplay.sh --test-only
-	@echo "Running self-play integration tests (requires a separately installed Postman RPC extension)"
-	@python -c "from postman import Client, ComputationQueue, Server" >/dev/null 2>&1 \
-		|| (echo "Postman RPC is not installed; see docs/selfplay_runtime.md" >&2; exit 1)
+	@echo "Running Postman tensor RPC native, wheel, and Python tests"
+	./scripts/build_postman.sh --test-only
+	@echo "Running distributed self-play integration tests"
 	python -m pytest \
 		fairdiplomacy/selfplay/exploit_test.py \
 		fairdiplomacy/selfplay/search/rollout_test.py

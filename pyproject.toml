@@ -33,6 +33,7 @@ dependencies = [
 [project.optional-dependencies]
 build = [
     "mypy-protobuf==5.1.0",
+    "scikit-build-core==1.0.3",
 ]
 dialogue = [
     "emoji>=2.14,<3",
@@ -60,6 +61,7 @@ dev = [
 training = [
     "nvidia-ml-py>=13.580",
     "pandas>=2.3,<3",
+    "pyzmq>=27.1,<28",
     "redis>=6,<7",
     "tensorboard>=2.20,<3",
     "wandb>=0.21,<1",

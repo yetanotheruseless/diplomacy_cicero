@@ -1,16 +1,19 @@
 
-# Simple postman example in Python.
+# Simple Postman example
 
-Run one server:
+Build Postman from the Cicero repository root, then run one server:
 
-```sh
-$ python example/server.py
+```bash
+./scripts/build_postman.sh
+python thirdparty/github/fairinternal/postman/example/server.py
 ```
 
-In another shell, run two clients:
+In two other shells, start one client in each. The server intentionally batches
+the two `batched_identity` calls together:
 
-```sh
-$ python example/client.py & python example/client.py &
+```bash
+python thirdparty/github/fairinternal/postman/example/client.py
 ```
 
-For a C++ example, take a look at the tests.
+`server_queue.py` shows the lower-level `ComputationQueue` interface. The
+native integration examples live in `postman/tests/cc/postman_test.cc`.

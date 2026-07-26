@@ -38,7 +38,8 @@ Docker is the supported development and validation path. The repository has
 one multi-stage [`Dockerfile`](Dockerfile):
 
 - `cpu-build` contains the complete CPU development runtime.
-- `cuda-runtime` contains the complete CUDA 13.0 runtime.
+- `cuda-runtime` contains the complete CUDA 13.0 runtime, including the
+  Postman extension built against the cu130 PyTorch ABI.
 
 Build and verify the CPU image:
 
@@ -108,8 +109,21 @@ RELA replay extension is built and tested separately:
 make test_selfplay_rela
 ```
 
-The broader `make test_selfplay` target also requires the separate Postman RPC
-extension and fails with a precise setup message when it is absent.
+Postman tensor RPC is built and tested separately with:
+
+```bash
+make test_postman
+```
+
+The Postman gate produces a platform wheel, verifies its relative Torch RPATH
+and macOS 14 deployment target where applicable, and exercises bounded
+queueing, cancellation, lifecycle, and wire serialization. The Docker CUDA
+build repeats that native build against the cu130 wheel; Postman still carries
+RPC tensors through CPU memory and model servers move them to CUDA explicitly.
+
+The broader `make test_selfplay` target builds RELA and Postman, runs both
+focused native/Python gates, and then runs the rollout/model-server integration
+tests.
 
 ## Why ParlAI is installed separately
 
@@ -143,6 +157,7 @@ project runtime, then run:
 uvx modal run modal_modern.py::build_and_adjudicate
 uvx modal run modal_modern.py::load_weights
 uvx modal run modal_modern.py::gpu_checks
+uvx modal run modal_selfplay.py
 ```
 
 These gates validate:
@@ -150,7 +165,8 @@ These gates validate:
 - Linux/x86_64 `pydipcc` build and multi-turn adjudication;
 - loading real strategy checkpoints under PyTorch 2.13;
 - a real CUDA 13.0 tensor kernel and strategy-model forward pass; and
-- a ParlAI/BART dialogue forward pass on a GPU.
+- a ParlAI/BART dialogue forward pass on a GPU; and
+- Linux/x86-64 RELA and Postman native-wheel build/test gates.
 
 See [MODAL_VALIDATION.md](MODAL_VALIDATION.md) for prerequisites and acceptance
 criteria. Earlier Python 3.11/cu124 experiments are historical evidence only

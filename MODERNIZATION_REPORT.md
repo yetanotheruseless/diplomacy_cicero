@@ -99,12 +99,17 @@ The canonical build and focused test command is:
 ./scripts/build_selfplay.sh
 ```
 
-Postman tensor RPC remains a separate opt-in dependency. Its checked-in
-configuration has been probed and fails precisely on uninitialized 2019-era
-gRPC/pybind11 gitlinks after mixing modern interpreter, Python library, and
-Torch discovery. The RELA build does not silently fetch or claim validation for
-that RPC path. See [`docs/selfplay_runtime.md`](docs/selfplay_runtime.md) for the
-exact boundary and probe.
+Postman tensor RPC now builds on the same runtime contract. The old gRPC 1.20
+and pybind11 gitlinks were removed in favor of an exact gRPC 1.83.0 checkout
+whose protobuf 35.1 source pin is verified before every build. A
+scikit-build-core backend produces a platform-tagged native wheel; the canonical
+gate verifies that wheel's relative Torch RPATH, macOS 14 deployment target
+where applicable, and clean-target import; it then runs the C++20/header tests
+and the extension-backed Python concurrency and lifecycle suite. Queue backlogs
+and asynchronous calls are bounded; shutdown cancels active RPC contexts and
+deterministically rejects queued work. See
+[`docs/selfplay_runtime.md`](docs/selfplay_runtime.md) for the complete
+distributed self-play contract.
 
 ### Python and checkpoint loading
 
@@ -137,8 +142,8 @@ The Docker stages are:
 |---|---|
 | `cpu-build` | Complete CPU development/runtime image |
 | `cpu-test` | CPU image plus build-time verification |
-| `cuda-build` | CUDA 13.0 build image using `torch==2.13.0+cu130` |
-| `cuda-runtime` | CUDA runtime image with the compiled project |
+| `cuda-build` | CUDA 13.0 build image using `torch==2.13.0+cu130`; builds and tests Postman against that ABI |
+| `cuda-runtime` | CUDA runtime image with the compiled project and Postman wheel |
 
 GitHub Actions builds the CPU development image and runs
 `verify_full_build.sh --accelerator cpu`. It also proves that `cuda-runtime`
@@ -164,6 +169,12 @@ and the app scaled back to zero workers. Exact commit, worker, checkpoint, and
 run identifiers are recorded in `MODAL_VALIDATION.md` and
 `MODAL_ORACLE_SERVING.md`.
 
+The distributed self-play CPU gate also passed on 2026-07-26 in Modal run
+`ap-hdQ6Bho2Zynt2OKOUtqBVx`: RELA and Postman each passed CTest plus 15 Python
+tests during image construction and again in the remote function. The Linux
+Postman artifact was a native CPython 3.12/x86-64 wheel with a verified
+`$ORIGIN` Torch RPATH.
+
 ## Current acceptance gates
 
 ```bash
@@ -171,6 +182,8 @@ run identifiers are recorded in `MODAL_VALIDATION.md` and
 docker build --target cpu-build -t diplomacy-cicero:cpu .
 docker run --rm diplomacy-cicero:cpu \
   ./scripts/verify_full_build.sh --accelerator cpu
+docker run --rm diplomacy-cicero:cpu \
+  ./scripts/build_postman.sh
 
 # Container CUDA contract on a GPU host
 docker build --target cuda-runtime -t diplomacy-cicero:cuda .
@@ -181,6 +194,7 @@ docker run --rm --gpus all diplomacy-cicero:cuda \
 uvx modal run modal_modern.py::build_and_adjudicate
 uvx modal run modal_modern.py::load_weights
 uvx modal run modal_modern.py::gpu_checks
+uvx modal run modal_selfplay.py
 ```
 
 A release claim requires the exact version assertions and functional checks,

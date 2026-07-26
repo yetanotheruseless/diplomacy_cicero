@@ -6,6 +6,8 @@ LICENSE file in the root directory of this source tree.
 */
 #pragma once
 
+#include <stdexcept>
+
 namespace postman {
 
 class ConnectionError : public std::runtime_error {

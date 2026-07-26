@@ -4,13 +4,11 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 #
-"""Pure-Python drop-in replacement for FAIR's ``nest`` pybind11 extension.
+"""Pure-Python implementation of the ``nest`` API used by Cicero.
 
-Cicero depends on ``facebookresearch/nest`` (a C++/pybind11 library for mapping
-functions over nested structures of dicts / lists / tuples of tensors). That
-extension is part of the unreleased ``fairinternal/postman`` tree and is not
-pip-installable; building it against modern pybind11/libtorch is an extra native
-build on top of pydipcc.
+The Postman RPC extension embeds FAIR's small C++ nest header for native tensor
+serialization. Python application code uses this module instead of maintaining
+a second pybind11 extension for the same tree operations.
 
 Cicero only uses a tiny slice of the ``nest`` API:
 
@@ -36,7 +34,8 @@ and its test suite (``nest/nest_test.py``):
   only recursing into plain tuple/list/dict).
 """
 
-from typing import Any, Callable, Iterator
+from collections.abc import Callable, Iterator
+from typing import Any
 
 
 def _is_mapping(n: Any) -> bool:
@@ -62,7 +61,7 @@ def flatten(n: Any) -> Iterator[Any]:
         yield n
 
 
-def map(f: Callable[[Any], Any], n: Any) -> Any:  # noqa: A001 (shadow builtin: match upstream API)
+def map(f: Callable[[Any], Any], n: Any) -> Any:
     """Apply ``f`` to each leaf of ``n``, preserving structure."""
     if _is_sequence(n):
         return type(n)(map(f, sn) for sn in n)
@@ -75,13 +74,9 @@ def map(f: Callable[[Any], Any], n: Any) -> Any:  # noqa: A001 (shadow builtin: 
 def _map_many(f: Callable[[Any], Any], nests):
     head = nests[0]
     if _is_sequence(head):
-        return type(head)(
-            _map_many(f, [n[i] for n in nests]) for i in range(len(head))
-        )
+        return type(head)(_map_many(f, [n[i] for n in nests]) for i in range(len(head)))
     elif _is_mapping(head):
-        return type(head)(
-            (key, _map_many(f, [n[key] for n in nests])) for key in head
-        )
+        return type(head)((key, _map_many(f, [n[key] for n in nests])) for key in head)
     else:
         # Leaf: hand f the tuple of corresponding leaves.
         return f(tuple(nests))

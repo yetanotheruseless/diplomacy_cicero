@@ -5,7 +5,11 @@ This source code is licensed under the MIT license found in the
 LICENSE file in the root directory of this source tree.
 */
 
+#include <chrono>
+#include <cstddef>
+#include <future>
 #include <optional>
+#include <stdexcept>
 
 // Enable including numpy via numpy_stub.h.
 #define USE_NUMPY 1
@@ -50,6 +54,11 @@ std::invoke_result_t<Function> callwithcatch(Function f) {
 }
 
 PYBIND11_MODULE(rpc, m) {
+  m.attr("__grpc_version__") = CICERO_POSTMAN_GRPC_VERSION;
+  m.attr("__protobuf_version__") = CICERO_POSTMAN_PROTOBUF_VERSION;
+  m.attr("__torch_version__") = CICERO_POSTMAN_TORCH_VERSION;
+  m.attr("__protobuf_version_number__") = GOOGLE_PROTOBUF_VERSION;
+
   py::register_exception_translator([](std::exception_ptr ptr) {
     try {
       if (ptr) std::rethrow_exception(ptr);
@@ -68,7 +77,10 @@ PYBIND11_MODULE(rpc, m) {
 
   py::class_<Client>(m, "Client")
       .def(py::init<const std::string &>(), py::arg("address"))
-      .def("connect", &Client::connect, py::arg("deadline_sec") = 60)
+      .def("connect", &Client::connect, py::arg("deadline_sec") = 60,
+           py::call_guard<py::gil_scoped_release>())
+      .def("close", &Client::close,
+           py::call_guard<py::gil_scoped_release>())
       .def("call",
            [](Client *client, const std::string &function,
               const TensorNest &inputs) -> TensorNest {
@@ -81,10 +93,30 @@ PYBIND11_MODULE(rpc, m) {
            });
 
   py::class_<std::future<TensorNest>>(m, "PostmanFuture")
-      .def("get", &std::future<TensorNest>::get,
-           py::call_guard<py::gil_scoped_release>())
+      .def("get",
+           [](std::future<TensorNest>* future) {
+             if (!future->valid()) {
+               throw std::logic_error(
+                   "PostmanFuture.get() may only be called once");
+             }
+             return callwithcatch(
+                 [&]() { return future->get(); });
+           })
       .def("wait", &std::future<TensorNest>::wait,
-           py::call_guard<py::gil_scoped_release>());
+           py::call_guard<py::gil_scoped_release>())
+      .def(
+          "wait_for",
+          [](std::future<TensorNest>* future, double timeout_sec) {
+            if (timeout_sec < 0) {
+              throw std::invalid_argument(
+                  "timeout_sec must be non-negative");
+            }
+            py::gil_scoped_release release;
+            return future->wait_for(
+                       std::chrono::duration<double>(timeout_sec)) ==
+                std::future_status::ready;
+          },
+          py::arg("timeout_sec"));
 
   py::class_<AsyncClient::Streams, std::shared_ptr<AsyncClient::Streams>>(
       m, "Streams")
@@ -99,8 +131,15 @@ PYBIND11_MODULE(rpc, m) {
            py::call_guard<py::gil_scoped_release>());
 
   py::class_<AsyncClient>(m, "AsyncClient")
-      .def(py::init<const std::string &>(), py::arg("address"))
-      .def("connect", &AsyncClient::connect, py::arg("deadline_sec") = 60);
+      .def(
+          py::init<std::string, std::size_t, std::size_t>(),
+          py::arg("address"),
+          py::arg("max_concurrent_calls") =
+              AsyncClient::kDefaultMaxConcurrentCalls,
+          py::arg("max_outstanding_calls") =
+              AsyncClient::kDefaultMaxOutstandingCalls)
+      .def("connect", &AsyncClient::connect, py::arg("deadline_sec") = 60,
+           py::call_guard<py::gil_scoped_release>());
 
   // Server.
 
@@ -151,8 +190,13 @@ PYBIND11_MODULE(rpc, m) {
 
   py::class_<ComputationQueue, std::shared_ptr<ComputationQueue>>(
       m, "ComputationQueue")
-      .def(py::init<uint32_t>(), py::arg("batch_size"))
-      .def("close", &ComputationQueue::close)
+      .def(
+          py::init<std::uint32_t, std::size_t>(),
+          py::arg("batch_size"),
+          py::arg("max_pending_batches") =
+              ComputationQueue::kDefaultMaxPendingBatches)
+      .def("close", &ComputationQueue::close,
+           py::call_guard<py::gil_scoped_release>())
       .def("__iter__",
            [](std::shared_ptr<ComputationQueue> self) { return self; })
       .def("__next__", &ComputationQueue::get,

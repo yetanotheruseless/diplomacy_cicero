@@ -4,32 +4,34 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 #
-import time
+from __future__ import annotations
+
 import threading
+import time
 
 import torch
-import postman
 
+import postman
 
 # A server example showing some more postman stuff.
 
 
-def pyfunc(t):
-    return 42 * (t + 1)
+def pyfunc(tensor: torch.Tensor) -> torch.Tensor:
+    return 42 * (tensor + 1)
 
 
-def identity(arg):
+def identity(arg: object) -> object:
     print(arg)
     return arg
 
 
-def main():
+def main() -> None:
     # TODO: Re-add TorchScript modules. Example code:
     # https://github.com/fairinternal/torchbeast/blob/4e34d2b6493ea2f2d364e8cd7c5eb9596b9dcb6d/torchbeast/server.cc#L185
 
     # module = torch.jit.script(torch.nn.Linear(2, 3))
 
-    server = postman.Server("localhost:12345")
+    server = postman.Server("127.0.0.1:12345")
 
     # s.bind("mymodule", module)
     server.bind("pyfunc", pyfunc, batch_size=1)
@@ -42,7 +44,7 @@ def main():
     queue = postman.ComputationQueue(batch_size=2)
     server.bind_queue("batched_identity2", queue)
 
-    def read_queue():
+    def read_queue() -> None:
         try:
             while True:
                 with queue.get(wait_till_full=False) as batch:
@@ -50,15 +52,17 @@ def main():
         except StopIteration:
             return
 
-    thread = threading.Thread(target=read_queue)
+    thread = threading.Thread(target=read_queue, name="postman-example-queue")
     thread.start()
 
     server.run()
 
     try:
         while True:
-            time.sleep(1)  # Could also deal with signals. I guess.
+            time.sleep(1)
     except KeyboardInterrupt:
+        pass
+    finally:
         queue.close()
         server.stop()
         server.wait()
