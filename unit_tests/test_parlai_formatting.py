@@ -290,7 +290,7 @@ class TestOrderFormatting(unittest.TestCase):
         seq = self._get_sequences("shortstate_order_chunk", metadata=metadata)[RETREAT_PHASE][
             ENGLAND
         ]
-        self.assertEquals(
+        self.assertEqual(
             seq["input"],
             "units: Austria: A BUD, A MUN, A RUM, F TRI; England: A BEL, F BRE, F ENG, F IRI, F NWY; France: A BUR, A GAS, A PAR, F POR; Germany: *A MUN, A BER, A HOL, F DEN, F SWE; Italy: A TYR, A VEN, F ADR, F TUN; Russia: A UKR, A WAR, F BAL, F SEV; Turkey: A ARM, A GRE, A SER, F AEG, F BLA [EO_STATE] F1902R England 1 1 order:",
         )

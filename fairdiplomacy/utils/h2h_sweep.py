@@ -234,7 +234,7 @@ class H2HSweep:
 
         power_scores_list = None
         if cache_path.exists():
-            cache_content = torch.load(cache_path)
+            cache_content = torch.load(cache_path, weights_only=False)
             if cache_content["key"] != cache_key:
                 print("Invalidating", cache_path)
                 cache_path.unlink()

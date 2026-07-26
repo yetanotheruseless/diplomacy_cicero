@@ -172,7 +172,7 @@ def maybe_launch(
             ckpt_dir = checkpoint_repo.handle_parser_arg(checkpoint, exp_handle.exp_path)
         util.run_with_config(main, exp_handle, cfg, overrides, ckpt_dir, log_level)
     if exp_handle.is_done():
-        result = torch.load(exp_handle.result_path)
+        result = torch.load(exp_handle.result_path, weights_only=False)
         if result is not None:
             simple_result = {k: v for k, v in result.items() if isinstance(v, (int, float, str))}
             pprint.pprint(simple_result, indent=2)

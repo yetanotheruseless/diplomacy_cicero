@@ -23,11 +23,13 @@ License of that code:
 #   copies or substantial portions of the Software.
 # ==============================================================================
 """
+import importlib.resources
 import json
 import logging
 from typing import Dict, Set
-import importlib.resources
+
 import numpy as np
+
 from fairdiplomacy import pydipcc
 
 EOS_IDX = -1
@@ -85,9 +87,10 @@ def _get_order_vocabulary():
     """ Computes the list of all valid orders on the standard map
         :return: A sorted list of all valid orders on the standard map
     """
-    orders_by_unit = json.loads(
-        importlib.resources.read_text("fairdiplomacy.models", "order_vocab_by_unit.json")
+    vocabulary_path = importlib.resources.files("fairdiplomacy.models").joinpath(
+        "order_vocab_by_unit.json"
     )
+    orders_by_unit = json.loads(vocabulary_path.read_text(encoding="utf-8"))
 
     orders_by_unit = {k: sorted(list(v)) for k, v in orders_by_unit.items()}
     sorted_unit_keys = sorted(orders_by_unit)

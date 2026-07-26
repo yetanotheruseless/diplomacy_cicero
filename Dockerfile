@@ -1,134 +1,163 @@
-FROM ubuntu:20.04
+# syntax=docker/dockerfile:1.7
 
-# Set noninteractive installation
+ARG UBUNTU_VERSION=24.04
+ARG CUDA_VERSION=13.0.3
+ARG PYTHON_VERSION=3.12
+ARG TORCH_VERSION=2.13.0
+ARG PROTOC_VERSION=35.1
+
+FROM ubuntu:${UBUNTU_VERSION} AS cpu-build
+
+ARG PYTHON_VERSION
+ARG TORCH_VERSION
+ARG PROTOC_VERSION
 ENV DEBIAN_FRONTEND=noninteractive
+ENV VIRTUAL_ENV=/opt/cicero
+ENV PATH="${VIRTUAL_ENV}/bin:/usr/local/bin:${PATH}"
+ENV PYTHONPATH=/app
+ENV CC=gcc-13
+ENV CXX=g++-13
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    wget \
-    bzip2 \
-    ca-certificates \
-    curl \
-    git \
-    build-essential \
-    cmake \
-    autoconf \
-    libtool \
-    pkg-config \
-    libgoogle-glog-dev \
-    python3.8 \
-    python3.8-dev \
-    python3-pip \
-    software-properties-common && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        cmake \
+        curl \
+        g++-13 \
+        gcc-13 \
+        git \
+        libgflags-dev \
+        libgoogle-glog-dev \
+        ninja-build \
+        python${PYTHON_VERSION} \
+        python${PYTHON_VERSION}-dev \
+        python${PYTHON_VERSION}-venv \
+        unzip \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install GCC 9.4 to match the version in requirements
-RUN apt-get update && \
-    apt-get install -y gcc-9 g++-9 && \
-    update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 90 && \
-    update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-9 90 && \
-    update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-9 90 && \
-    update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-9 90 && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+RUN python${PYTHON_VERSION} -m venv "${VIRTUAL_ENV}" \
+    && python -m pip install --no-cache-dir --upgrade \
+        "pip==26.1.2" \
+        "setuptools==83.0.0" \
+        "wheel==0.47.0"
 
-# Set up Python 3.8 as the default
-RUN ln -sf /usr/bin/python3.8 /usr/bin/python && \
-    ln -sf /usr/bin/pip3 /usr/bin/pip && \
-    python -m pip install --upgrade pip setuptools wheel
-
-# Install pybind11 and other required packages
-RUN apt-get update && \
-    apt-get install -y python3-dev pybind11-dev && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-# Build protobuf 3.19.1 from source (exact version required)
-RUN apt-get update && apt-get install -y git autoconf automake libtool curl unzip && \
-    git clone https://github.com/protocolbuffers/protobuf.git /tmp/protobuf && \
-    cd /tmp/protobuf && \
-    git checkout v3.19.1 && \
-    ./autogen.sh && \
-    ./configure && \
-    make -j2 && \
-    make install && \
-    ldconfig && \
-    cd / && \
-    rm -rf /tmp/protobuf && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-# Install Python protobuf package with matching version
-RUN pip install protobuf==3.19.1
-
-# Set working directory
 WORKDIR /app
+COPY scripts/install_protoc.sh /tmp/install_protoc.sh
+RUN PROTOC_VERSION="${PROTOC_VERSION}" bash /tmp/install_protoc.sh \
+    && rm /tmp/install_protoc.sh
 
-# Copy the entire repository
-COPY . /app/
+COPY . /app
+RUN python -m pip install --no-cache-dir \
+        "torch==${TORCH_VERSION}" \
+        --index-url https://download.pytorch.org/whl/cpu \
+    && python -m pip install --no-cache-dir --editable ".[build,dialogue,dev]" \
+    && python -m pip check
 
-# Compile protobuf files
-RUN make protos_basic
+RUN make protos \
+    && PYDIPCC_OUT_DIR=/app/fairdiplomacy N_DIPCC_JOBS=4 make dipcc
 
-# Install Python dependencies
-RUN pip install pybind11 numpy==1.20.3 torch==1.10.0 cython==0.29.24
+RUN ./scripts/install_parlai.sh
 
-# Fix directory structure for dipcc (nested directories)
-RUN mkdir -p /app/dipcc/cc /app/dipcc/pybind && \
-    cp -r /app/dipcc/dipcc/cc/* /app/dipcc/cc/ && \
-    cp -r /app/dipcc/dipcc/pybind/* /app/dipcc/pybind/ && \
-    cp -r /app/dipcc/dipcc/profiling /app/dipcc/
+FROM cpu-build AS cpu-test
 
-# Build dipcc with 2 jobs to avoid memory issues
-RUN cd /app/dipcc && \
-    pybind11_DIR=$(python3 -c "import pybind11; print(pybind11.get_cmake_dir())") && \
-    mkdir -p build && cd build && \
-    cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$pybind11_DIR .. && \
-    make -j2 pydipcc && \
-    cp dipcc/python/pydipcc*.so /app/fairdiplomacy/ && \
-    echo "Built pydipcc module successfully"
+RUN ./scripts/verify_full_build.sh
 
-# Configure fairdiplomacy to import pydipcc with cross-platform compatibility
-RUN echo '#!/usr/bin/env python' > /app/fairdiplomacy/__init__.py && \
-    echo 'import sys, os, glob' >> /app/fairdiplomacy/__init__.py && \
-    echo 'import importlib.util' >> /app/fairdiplomacy/__init__.py && \
-    echo '' >> /app/fairdiplomacy/__init__.py && \
-    echo '# Dynamically find pydipcc module regardless of platform suffix' >> /app/fairdiplomacy/__init__.py && \
-    echo 'def load_pydipcc():' >> /app/fairdiplomacy/__init__.py && \
-    echo '    """Dynamically find and load the pydipcc module across different platforms."""' >> /app/fairdiplomacy/__init__.py && \
-    echo '    # First try the standard approach (if dipcc is installed as a package)' >> /app/fairdiplomacy/__init__.py && \
-    echo '    try:' >> /app/fairdiplomacy/__init__.py && \
-    echo '        import dipcc' >> /app/fairdiplomacy/__init__.py && \
-    echo '        sys.modules["fairdiplomacy.pydipcc"] = dipcc' >> /app/fairdiplomacy/__init__.py && \
-    echo '        return dipcc' >> /app/fairdiplomacy/__init__.py && \
-    echo '    except ImportError:' >> /app/fairdiplomacy/__init__.py && \
-    echo '        pass  # Continue to file-based approach' >> /app/fairdiplomacy/__init__.py && \
-    echo '' >> /app/fairdiplomacy/__init__.py && \
-    echo '    # Look for .so files in the current directory' >> /app/fairdiplomacy/__init__.py && \
-    echo '    current_dir = os.path.dirname(__file__)' >> /app/fairdiplomacy/__init__.py && \
-    echo '    so_pattern = os.path.join(current_dir, "pydipcc*.so")' >> /app/fairdiplomacy/__init__.py && \
-    echo '    so_files = glob.glob(so_pattern)' >> /app/fairdiplomacy/__init__.py && \
-    echo '' >> /app/fairdiplomacy/__init__.py && \
-    echo '    if so_files:' >> /app/fairdiplomacy/__init__.py && \
-    echo '        # Use the first one found (could sort by modification time if needed)' >> /app/fairdiplomacy/__init__.py && \
-    echo '        so_path = so_files[0]' >> /app/fairdiplomacy/__init__.py && \
-    echo '        spec = importlib.util.spec_from_file_location("pydipcc", so_path)' >> /app/fairdiplomacy/__init__.py && \
-    echo '        if spec:' >> /app/fairdiplomacy/__init__.py && \
-    echo '            pydipcc = importlib.util.module_from_spec(spec)' >> /app/fairdiplomacy/__init__.py && \
-    echo '            spec.loader.exec_module(pydipcc)' >> /app/fairdiplomacy/__init__.py && \
-    echo '            sys.modules["fairdiplomacy.pydipcc"] = pydipcc' >> /app/fairdiplomacy/__init__.py && \
-    echo '            return pydipcc' >> /app/fairdiplomacy/__init__.py && \
-    echo '' >> /app/fairdiplomacy/__init__.py && \
-    echo '    # If we get here, no module was found' >> /app/fairdiplomacy/__init__.py && \
-    echo '    raise ImportError(f"Could not find pydipcc module. Searched for: {so_pattern}")' >> /app/fairdiplomacy/__init__.py && \
-    echo '' >> /app/fairdiplomacy/__init__.py && \
-    echo '# Load the module and expose it' >> /app/fairdiplomacy/__init__.py && \
-    echo 'pydipcc = load_pydipcc()' >> /app/fairdiplomacy/__init__.py
+CMD ["/bin/bash"]
 
-# Copy the enhanced test script file (instead of creating it inline)
-COPY test_pydipcc.py /app/test_pydipcc.py
-RUN chmod +x /app/test_pydipcc.py
 
-# Default command
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu${UBUNTU_VERSION} AS cuda-build
+
+ARG PYTHON_VERSION
+ARG TORCH_VERSION
+ARG PROTOC_VERSION
+ENV DEBIAN_FRONTEND=noninteractive
+ENV VIRTUAL_ENV=/opt/cicero
+ENV PATH="${VIRTUAL_ENV}/bin:/usr/local/bin:${PATH}"
+ENV PYTHONPATH=/app
+ENV CC=gcc-13
+ENV CXX=g++-13
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        cmake \
+        curl \
+        g++-13 \
+        gcc-13 \
+        git \
+        libgflags-dev \
+        libgoogle-glog-dev \
+        ninja-build \
+        python${PYTHON_VERSION} \
+        python${PYTHON_VERSION}-dev \
+        python${PYTHON_VERSION}-venv \
+        unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python${PYTHON_VERSION} -m venv "${VIRTUAL_ENV}" \
+    && python -m pip install --no-cache-dir --upgrade \
+        "pip==26.1.2" \
+        "setuptools==83.0.0" \
+        "wheel==0.47.0"
+
+WORKDIR /app
+COPY scripts/install_protoc.sh /tmp/install_protoc.sh
+RUN PROTOC_VERSION="${PROTOC_VERSION}" bash /tmp/install_protoc.sh \
+    && rm /tmp/install_protoc.sh
+
+COPY . /app
+RUN python -m pip install --no-cache-dir \
+        "torch==${TORCH_VERSION}" \
+        --index-url https://download.pytorch.org/whl/cu130 \
+    && python -m pip install --no-cache-dir --editable ".[build,dialogue,dev]" \
+    && python -m pip check
+
+RUN make protos \
+    && PYDIPCC_OUT_DIR=/app/fairdiplomacy N_DIPCC_JOBS=4 make dipcc
+
+RUN ./scripts/install_parlai.sh \
+    && python - <<'PY'
+import torch
+
+assert torch.__version__.split("+", 1)[0] == "2.13.0", torch.__version__
+assert torch.version.cuda == "13.0", torch.version.cuda
+print("CUDA build Torch:", torch.__version__, "CUDA:", torch.version.cuda)
+PY
+
+RUN rm -rf /app/dipcc/build
+
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-runtime-ubuntu${UBUNTU_VERSION} AS cuda-runtime
+
+ARG PYTHON_VERSION
+ENV DEBIAN_FRONTEND=noninteractive
+ENV VIRTUAL_ENV=/opt/cicero
+ENV PATH="${VIRTUAL_ENV}/bin:/usr/local/bin:${PATH}"
+ENV PYTHONPATH=/app
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        ca-certificates \
+        libgflags2.2 \
+        libgoogle-glog0v6t64 \
+        python${PYTHON_VERSION} \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=cuda-build /opt/cicero /opt/cicero
+COPY --from=cuda-build /app /app
+
+WORKDIR /app
+RUN python - <<'PY'
+import torch
+from fairdiplomacy import pydipcc
+
+assert torch.__version__.split("+", 1)[0] == "2.13.0", torch.__version__
+assert torch.version.cuda == "13.0", torch.version.cuda
+game = pydipcc.Game()
+game.process()
+assert game.current_short_phase == "F1901M", game.current_short_phase
+print("CUDA runtime smoke passed:", torch.__version__, torch.version.cuda)
+PY
+
 CMD ["/bin/bash"]

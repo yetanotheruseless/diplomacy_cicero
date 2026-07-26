@@ -1,53 +1,111 @@
-name: Docker Build and Test
-
-# Builds the unified CPU image (Dockerfile.unified: ubuntu:20.04 + protobuf 3.19.1
-# from source + dipcc) and runs the pydipcc / integration / full-build checks in it.
-# No registry push and no repository secrets are required.
+name: Modern Runtime Docker Build
 
 on:
   push:
-    branches: [ main, docker-experiments, cicero-modal-gpu-run ]
+    branches: [main, "modernize/**"]
   pull_request:
-    branches: [ main, cicero-modal-gpu-run ]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: docker-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UBUNTU_VERSION: "24.04"
+  PYTHON_VERSION: "3.12"
+  TORCH_VERSION: "2.13.0"
+  PROTOC_VERSION: "35.1"
+  CUDA_VERSION: "13.0.3"
+
 jobs:
-  docker-build-test:
-    runs-on: ubuntu-latest
+  cpu-test:
+    name: CPU build and tests
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Free up runner disk space
+      - name: Free runner disk space
+        shell: bash
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          set -euo pipefail
+          sudo rm -rf -- \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /usr/local/share/boost \
+            /opt/ghc
           df -h /
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Docker image
+      - name: Build CPU image
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.unified
+          file: Dockerfile
+          target: cpu-build
+          platforms: linux/amd64
           load: true
-          tags: diplomacy_cicero:test
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: diplomacy-cicero:cpu-test
+          cache-from: type=gha,scope=cpu-build
+          cache-to: type=gha,mode=max,scope=cpu-build
           build-args: |
-            DIPCC_BUILD_JOBS=4
+            UBUNTU_VERSION=${{ env.UBUNTU_VERSION }}
+            PYTHON_VERSION=${{ env.PYTHON_VERSION }}
+            TORCH_VERSION=${{ env.TORCH_VERSION }}
+            PROTOC_VERSION=${{ env.PROTOC_VERSION }}
+            CUDA_VERSION=${{ env.CUDA_VERSION }}
 
-      - name: Test pydipcc module
-        run: docker run --rm diplomacy_cicero:test python /app/test_pydipcc.py
+      - name: Verify CPU image contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm diplomacy-cicero:cpu-test \
+            ./scripts/verify_full_build.sh --accelerator cpu
 
-      - name: Run integration tests
-        run: docker run --rm diplomacy_cicero:test python -m unittest unit_tests.test_full_integration
+  cuda-runtime:
+    name: CUDA 13.0 runtime image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Run verification script
-        run: docker run --rm diplomacy_cicero:test ./scripts/verify_full_build.sh
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf -- \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /usr/local/share/boost \
+            /opt/ghc
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # This proves that the complete CUDA runtime target builds on every PR.
+      # GPU execution is validated separately on GPU-backed cloud workers.
+      - name: Build cuda-runtime target
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: cuda-runtime
+          platforms: linux/amd64
+          outputs: type=cacheonly
+          cache-from: type=gha,scope=cuda-runtime
+          cache-to: type=gha,mode=max,scope=cuda-runtime
+          build-args: |
+            UBUNTU_VERSION=${{ env.UBUNTU_VERSION }}
+            PYTHON_VERSION=${{ env.PYTHON_VERSION }}
+            TORCH_VERSION=${{ env.TORCH_VERSION }}
+            PROTOC_VERSION=${{ env.PROTOC_VERSION }}
+            CUDA_VERSION=${{ env.CUDA_VERSION }}

@@ -1,6 +1,6 @@
 POSTMAN_DIR=$(realpath thirdparty/github/fairinternal/postman/)
 
-.PHONY: all compile clean dipcc protos selfplay check_deps protos_basic validate_protos
+.PHONY: all compile compile_selfplay clean clean_protos dipcc protos selfplay check_deps protos_basic validate_protos test test_fast test_thread_pool test_selfplay
 
 all: compile
 
@@ -8,11 +8,17 @@ all: compile
 check_deps:
 	@echo "Checking for required dependencies..."
 	@which cmake > /dev/null || (echo "Error: cmake not found. Run scripts/install_dependencies.sh to install" && exit 1)
+	@which ninja > /dev/null || (echo "Error: ninja not found. Install ninja-build" && exit 1)
 	@which protoc > /dev/null || (echo "Error: protoc not found. Run scripts/install_dependencies.sh to install" && exit 1)
+	@which protoc-gen-mypy > /dev/null || (echo "Error: protoc-gen-mypy not found. Install the build extra" && exit 1)
 	@echo "Dependencies OK"
 
-# Target to build all internal code and resources.
-compile: | check_deps dipcc protos selfplay
+# Build the supported inference and dialogue runtime.
+compile: | check_deps protos dipcc
+
+# Distributed self-play has additional native dependencies and is intentionally
+# opt-in until that subsystem's modernization is complete.
+compile_selfplay: | compile selfplay
 
 dipcc:
 	@echo "Building dipcc..."
@@ -28,36 +34,38 @@ selfplay:
 		&& cmake ../../fairdiplomacy/selfplay/cc -DPOSTMAN_DIR=$(POSTMAN_DIR) -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=../../fairdiplomacy/selfplay \
 		&& make -j
 
-# Compiles protos and sets up pyi files for pyright to be happy.
+# Compile modern protobuf modules, type stubs, and heyhi frozen-config wrappers.
 protos:
-	@echo "Compiling protocol buffers with mypy support..."
-	@if command -v protoc-gen-mypy > /dev/null; then \
-		protoc conf/*.proto --python_out ./ --mypy_out ./; \
-	else \
-		echo "Warning: protoc-gen-mypy not found, falling back to basic protoc"; \
-		$(MAKE) protos_basic; \
-	fi
-	python heyhi/bin/patch_protos.py conf/*pb2.py
+	@echo "Compiling protocol buffers..."
+	rm -f conf/*_pb2.py conf/*_pb2.pyi conf/*_cfgs.py conf/*_cfgs.pyi
+	protoc --proto_path=. --python_out=. --mypy_out=. conf/*.proto
+	python heyhi/bin/patch_protos.py conf/*_pb2.py
 
-# Fallback target for protos without mypy support
-protos_basic:
-	@echo "Compiling protocol buffers without mypy support..."
-	protoc conf/*.proto --python_out ./
-	@echo "To validate protobuf compilation, run: python scripts/validate_protobuf.py"
+# Compatibility alias: callers still receive the complete modern generation.
+protos_basic: protos
 
-validate_protos: | protos_basic
+validate_protos: | protos
 	@echo "Validating protocol buffer compilation..."
 	python scripts/validate_protobuf.py
 
-test: | test_fast test_cc
+test: | test_fast test_thread_pool
 
 test_fast: | compile
-	@echo "Running fast (unit) tests"
-	python -m pytest heyhi/ fairdiplomacy/ parlai_diplomacy/ unit_tests/
+	@echo "Running runtime unit and integration tests"
+	python -m pytest \
+		--ignore=fairdiplomacy/selfplay/exploit_test.py \
+		--ignore=fairdiplomacy/selfplay/search/rollout_test.py \
+		heyhi/ fairdiplomacy/ parlai_diplomacy/ unit_tests/
 
-test_cc: | compile
-	@echo "Running c++ tests"
+test_thread_pool: | compile
+	python -m pytest dipcc/python/test_thread_pool.py
+
+test_selfplay: | compile_selfplay
+	@echo "Running distributed self-play C++ tests"
 	./build/selfplay/prioritized_replay_test
+	python -m pytest \
+		fairdiplomacy/selfplay/exploit_test.py \
+		fairdiplomacy/selfplay/search/rollout_test.py
 
 pyright:
 	./bin/pyright_local.py
@@ -65,3 +73,6 @@ pyright:
 clean:
 	-make -C dipcc/build clean
 	rm -rf build
+
+clean_protos:
+	rm -f conf/*_pb2.py conf/*_pb2.pyi conf/*_cfgs.py conf/*_cfgs.pyi

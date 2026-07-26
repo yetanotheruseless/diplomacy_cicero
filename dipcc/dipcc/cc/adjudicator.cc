@@ -7,6 +7,7 @@ LICENSE file in the root directory of this source tree.
 #include <glog/logging.h>
 #include <map>
 #include <set>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -1278,7 +1279,7 @@ GameState GameState::process_m(
     const std::unordered_map<Power, std::vector<Order>> &orders,
     bool exception_on_convoy_paradox) {
   JCHECK(this->get_phase().phase_type == 'M',
-         "Bad phase_type: " + this->get_phase().phase_type);
+         std::string("Bad phase_type: ") + this->get_phase().phase_type);
   DLOG(INFO) << "Process phase: " << this->get_phase().to_string();
 
   const unordered_map<Loc, set<Order>> &all_possible_orders(

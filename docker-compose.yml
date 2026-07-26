@@ -1,35 +1,60 @@
+x-modern-build-args: &modern-build-args
+  UBUNTU_VERSION: "24.04"
+  PYTHON_VERSION: "3.12"
+  TORCH_VERSION: "2.13.0"
+  PROTOC_VERSION: "35.1"
+  CUDA_VERSION: "13.0.3"
+
+x-cpu-build: &cpu-build
+  context: .
+  dockerfile: Dockerfile
+  target: cpu-build
+  args: *modern-build-args
+
+x-common-environment: &common-environment
+  PYTHONPATH: /app
+  PYTHONUNBUFFERED: "1"
+
 services:
-  # Main service using the unified Dockerfile
   diplomacy:
-    build:
-      context: .
-      dockerfile: Dockerfile.unified
-      args:
-        # Can be adjusted based on available memory
-        DIPCC_BUILD_JOBS: 2
-    volumes:
-      # Mount your local code to allow for development
-      - .:/app
-      # Mount a volume for model files (which are downloaded separately)
-      - diplomacy_models:/app/models
-    # Keep the container running
+    image: diplomacy-cicero:cpu
+    build: *cpu-build
+    init: true
     stdin_open: true
     tty: true
-    # Environment variables
-    environment:
-      - PYTHONPATH=/app
-  
-  # Lighter version for testing only
+    environment: *common-environment
+    volumes:
+      - diplomacy_models:/app/models
+
   diplomacy_test:
+    profiles: [test]
+    image: diplomacy-cicero:cpu
+    build: *cpu-build
+    init: true
+    environment: *common-environment
+    command: ["./scripts/verify_full_build.sh", "--accelerator", "cpu"]
+
+  diplomacy_cuda:
+    profiles: [cuda]
+    image: diplomacy-cicero:cuda
     build:
       context: .
-      dockerfile: Dockerfile.unified
-      target: test
+      dockerfile: Dockerfile
+      target: cuda-runtime
+      args: *modern-build-args
+    init: true
+    stdin_open: true
+    tty: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment: *common-environment
     volumes:
-      - .:/app
-    # Command to run tests
-    command: python /app/test_pydipcc.py
+      - diplomacy_models:/app/models
 
 volumes:
   diplomacy_models:
-    # Persistent volume for downloaded model files
