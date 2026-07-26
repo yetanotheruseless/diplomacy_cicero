@@ -8,10 +8,10 @@ LICENSE file in the root directory of this source tree.
 // Original implementation from https://github.com/facebookresearch/rela
 
 #include "prioritized_replay.h"
-#include <nest.h>
-#include <nest_pybind.h>
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 #include <torch/extension.h>
+
 namespace py = pybind11;
 using namespace buffer;
 
@@ -22,7 +22,7 @@ PYBIND11_MODULE(rela, m) {
 
   py::class_<NestPrioritizedReplay, std::shared_ptr<NestPrioritizedReplay>>(
       m, "NestPrioritizedReplay")
-      .def(py::init<int, int, float, float, bool, bool>(), py::arg("capacity"),
+      .def(py::init<int, int, float, float, int, bool>(), py::arg("capacity"),
            py::arg("seed"), py::arg("alpha"), py::arg("beta"),
            py::arg("prefetch"), py::arg("shuffle") = false)
       .def("load", &NestPrioritizedReplay::load)
@@ -38,7 +38,7 @@ PYBIND11_MODULE(rela, m) {
       .def("add_batch", &NestPrioritizedReplay::add_batch,
            py::call_guard<py::gil_scoped_release>())
       .def("add_batch_async", &NestPrioritizedReplay::add_batch_async,
-           py::call_guard<py::gil_scoped_release>())
+           py::call_guard<py::gil_scoped_release>(), py::keep_alive<0, 1>())
       .def("sample", &NestPrioritizedReplay::sample)
       .def("update_priority", &NestPrioritizedReplay::update_priority)
       .def("keep_priority", &NestPrioritizedReplay::keep_priority);

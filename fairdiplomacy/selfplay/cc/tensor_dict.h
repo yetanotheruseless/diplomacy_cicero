@@ -6,8 +6,9 @@ LICENSE file in the root directory of this source tree.
 */
 #pragma once
 #include <ostream>
+#include <stdexcept>
 
-#include <torch/extension.h>
+#include <torch/torch.h>
 #include <unordered_map>
 
 namespace rela {
@@ -181,7 +182,9 @@ template <typename Func> inline TensorDict apply(TensorDict &dict, Func f) {
 }
 
 inline TensorDict stack(const std::vector<TensorDict> &vec, int stackdim) {
-  assert(vec.size() >= 1);
+  if (vec.empty()) {
+    throw std::invalid_argument("Cannot stack an empty TensorDict vector");
+  }
   TensorDict ret;
   for (auto &name2tensor : vec[0]) {
     std::vector<torch::Tensor> buffer(vec.size());

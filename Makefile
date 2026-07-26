@@ -1,6 +1,4 @@
-POSTMAN_DIR=$(realpath thirdparty/github/fairinternal/postman/)
-
-.PHONY: all compile compile_selfplay clean clean_protos dipcc protos selfplay check_deps protos_basic validate_protos test test_fast test_thread_pool test_selfplay
+.PHONY: all compile compile_selfplay clean clean_protos dipcc protos selfplay check_deps protos_basic validate_protos test test_fast test_thread_pool test_selfplay test_selfplay_rela
 
 all: compile
 
@@ -16,8 +14,8 @@ check_deps:
 # Build the supported inference and dialogue runtime.
 compile: | check_deps protos dipcc
 
-# Distributed self-play has additional native dependencies and is intentionally
-# opt-in until that subsystem's modernization is complete.
+# The optional RELA prioritized-replay extension is kept out of the inference
+# build. Postman RPC remains a separate dependency; see docs/selfplay_runtime.md.
 compile_selfplay: | compile selfplay
 
 dipcc:
@@ -28,11 +26,8 @@ dipcc_debug:
 	MODE=Debug bash ./dipcc/compile.sh
 
 selfplay:
-	@echo "Building selfplay components..."
-	mkdir -p build/selfplay
-	cd build/selfplay \
-		&& cmake ../../fairdiplomacy/selfplay/cc -DPOSTMAN_DIR=$(POSTMAN_DIR) -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=../../fairdiplomacy/selfplay \
-		&& make -j
+	@echo "Building the optional RELA prioritized-replay extension..."
+	./scripts/build_selfplay.sh --build-only
 
 # Compile modern protobuf modules, type stubs, and heyhi frozen-config wrappers.
 protos:
@@ -60,9 +55,16 @@ test_fast: | compile
 test_thread_pool: | compile
 	python -m pytest dipcc/python/test_thread_pool.py
 
+test_selfplay_rela: | selfplay
+	@echo "Running RELA prioritized-replay native and Python tests"
+	./scripts/build_selfplay.sh --test-only
+
 test_selfplay: | compile_selfplay
-	@echo "Running distributed self-play C++ tests"
-	./build/selfplay/prioritized_replay_test
+	@echo "Running RELA prioritized-replay native and Python tests"
+	./scripts/build_selfplay.sh --test-only
+	@echo "Running self-play integration tests (requires a separately installed Postman RPC extension)"
+	@python -c "from postman import Client, ComputationQueue, Server" >/dev/null 2>&1 \
+		|| (echo "Postman RPC is not installed; see docs/selfplay_runtime.md" >&2; exit 1)
 	python -m pytest \
 		fairdiplomacy/selfplay/exploit_test.py \
 		fairdiplomacy/selfplay/search/rollout_test.py
@@ -73,6 +75,7 @@ pyright:
 clean:
 	-make -C dipcc/build clean
 	rm -rf build
+	rm -f fairdiplomacy/selfplay/rela*.so fairdiplomacy/selfplay/rela*.dylib fairdiplomacy/selfplay/rela*.pyd
 
 clean_protos:
 	rm -f conf/*_pb2.py conf/*_pb2.pyi conf/*_cfgs.py conf/*_cfgs.pyi

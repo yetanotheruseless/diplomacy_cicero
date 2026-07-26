@@ -101,12 +101,15 @@ python -m unittest unit_tests.test_full_integration
 python -m pytest path/to/test_file.py -q
 ```
 
-`make test` covers the supported inference and dialogue runtime. Distributed
-self-play has additional native dependencies and is intentionally separate:
+`make test` covers the supported inference and dialogue runtime. The optional
+RELA replay extension is built and tested separately:
 
 ```bash
-make test_selfplay
+make test_selfplay_rela
 ```
+
+The broader `make test_selfplay` target also requires the separate Postman RPC
+extension and fails with a precise setup message when it is absent.
 
 ## Why ParlAI is installed separately
 
@@ -195,6 +198,7 @@ The HeyHi configuration system is described in
 - [Docker guide](DOCKER_GUIDE.md)
 - [dipcc build notes](DIPCC_BUILD_NOTES.md)
 - [dipcc/Python integration](docs/dipcc_integration.md)
+- [optional RELA self-play runtime](docs/selfplay_runtime.md)
 - [modernization status](MODERNIZATION_REPORT.md)
 - [Modal validation gates](MODAL_VALIDATION.md)
 - [Modal oracle serving](MODAL_ORACLE_SERVING.md)
