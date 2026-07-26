@@ -1,136 +1,114 @@
-# Direct Usage Guide for Diplomacy Cicero
+# Direct `pydipcc` Usage
 
-If you're encountering issues with the standard `run.py` approach (which uses the heyhi framework), this guide provides an alternative method to use the core game engine directly.
+Use this interface when you need the game engine without loading neural or
+dialogue agents. It runs in the same supported Python 3.12 environment as the
+rest of Cicero.
 
-## Prerequisites
-
-- Docker environment set up as described in the main README
-- Downloaded model files (optional, only if you want to use the advanced agents)
-
-## Using the Core Game Engine
-
-### 1. Build the Core Game Engine
-
-We've created a specialized build script that builds just the essential C++ components:
+## Build and verify
 
 ```bash
-cd /app
-./build_minimal.sh
+make protos
+make dipcc
+python test_pydipcc.py
 ```
 
-This will build the dipcc C++ library and provide the core game engine functionality.
-
-### 2. Run a Simple Game
-
-Once the build is complete, you can use the direct interface:
+In Docker:
 
 ```bash
-python run_simple_game.py
+docker build --target cpu-build -t diplomacy-cicero:cpu .
+docker run --rm diplomacy-cicero:cpu python test_pydipcc.py
 ```
 
-This script:
-- Creates a new Diplomacy game
-- Shows game state information
-- Lists possible orders for each power
-- Demonstrates how to save and load games from JSON
-
-### 3. Programmatic Interface
-
-You can interact with the game engine directly in your Python code:
+## Create and advance a game
 
 ```python
-# Import the Game class from our custom package
-from dipcc_pkg import Game
+from fairdiplomacy import pydipcc
 
-# Create a new game
-game = Game()
+game = pydipcc.Game()
+print(game.current_short_phase)  # S1901M
 
-# Get the current phase
-current_phase = game.get_current_phase()
-print(f"Current phase: {current_phase}")
-
-# Get all possible orders
-orders = game.get_all_possible_orders()
-for power, power_orders in orders.items():
-    print(f"{power} has {len(power_orders)} possible orders")
-
-# Save game to JSON
-json_state = game.to_json()
-with open("game_state.json", "w") as f:
-    f.write(json_state)
-
-# Load game from JSON
-with open("game_state.json", "r") as f:
-    json_state = f.read()
-loaded_game = Game.from_json(json_state)
+game.set_orders(
+    "AUSTRIA",
+    ["A VIE - GAL", "A BUD - SER", "F TRI - ALB"],
+)
+game.process()
+print(game.current_short_phase)
 ```
 
-### 4. Available Methods
+Orders not supplied for a power are handled according to the engine's normal
+rules for that phase.
 
-The Game object provides these key methods:
+## Inspect legal orders
 
-- `game.get_current_phase()` - Get the current game phase
-- `game.get_state()` - Get the current game state
-- `game.get_all_possible_orders()` - Get all possible orders for each location
-- `game.to_json()` - Serialize the game to JSON
-- `Game.from_json(json_str)` - Create a game from JSON (static method)
-
-### 5. Limitations
-
-When using the direct interface:
-
-- You won't have access to the AI agents or dialogue functionality
-- The full initialization/advancement API is limited
-- You'll need to implement your own logic for things like turns and orders processing
-
-## For Advanced Users
-
-### Setting Orders
-
-To set orders for a power and process them:
+`get_orderable_locations()` maps powers to locations. Legal orders are indexed
+by location:
 
 ```python
-# Example based on the API we observed
-for power in ["FRANCE", "ENGLAND", "RUSSIA", "GERMANY", "AUSTRIA", "ITALY", "TURKEY"]:
-    # Set hold orders for all units of this power
-    # Note: The exact API parameters may need adjustment based on what's available
-    try:
-        # You'll need to figure out the exact parameter format based on the error messages
-        game.set_orders(power, ["A PAR H", "F BRE H"])  # Example orders
-    except Exception as e:
-        print(f"Error setting orders for {power}: {e}")
+orderable = game.get_orderable_locations()
+possible = game.get_all_possible_orders()
+
+for power, locations in orderable.items():
+    print(power)
+    for location in locations:
+        print(" ", location, possible[location])
 ```
 
-### Advanced Visualization
+## Serialize and clone
 
-To visualize games, you can use the HTML visualizer in `fairdiplomacy_external`:
+```python
+payload = game.to_json()
+restored = pydipcc.Game.from_json(payload)
+assert restored.current_short_phase == game.current_short_phase
 
-```bash
-python fairdiplomacy_external/game_to_html.py game_state.json
+copy = pydipcc.Game(game)
+batch = game.clone_n_times(8)
 ```
+
+The JSON schema is documented in
+[`docs/game_json_spec.md`](docs/game_json_spec.md).
+
+## Scores and state
+
+```python
+state = game.get_state()
+scores = dict(zip(
+    ["AUSTRIA", "ENGLAND", "FRANCE", "GERMANY", "ITALY", "RUSSIA", "TURKEY"],
+    game.get_scores(),
+))
+
+print(state["units"])
+print(state["centers"])
+print(scores)
+```
+
+## Agent-level usage
+
+The direct engine does not choose orders. To use a configured agent:
+
+```python
+from fairdiplomacy.agents import build_agent_from_cfg
+from fairdiplomacy.pydipcc import Game
+import conf.agents_cfgs as agents_cfgs
+
+agent = build_agent_from_cfg(
+    agents_cfgs.Agent(random=agents_cfgs.RandomAgent()).to_frozen()
+)
+state = agent.initialize_state("FRANCE")
+orders = agent.get_orders(Game(), "FRANCE", state)
+print(orders)
+```
+
+Real strategy/dialogue agents additionally require the separately downloaded
+model files.
 
 ## Troubleshooting
 
-If you encounter issues:
+If import fails, verify the extension path and ABI:
 
-1. Check the available methods on the Game object:
-   ```python
-   methods = [m for m in dir(game) if not m.startswith('_')]
-   print(methods)
-   ```
+```bash
+find fairdiplomacy -maxdepth 1 -name 'pydipcc*.so' -print
+python -c "from fairdiplomacy import pydipcc; print(pydipcc.__file__)"
+```
 
-2. For detailed error messages, use:
-   ```python
-   import traceback
-   try:
-       # Your code here
-   except Exception as e:
-       print(f"Error: {e}")
-       traceback.print_exc()
-   ```
-
-3. If you need to rebuild the core components, clean first:
-   ```bash
-   make clean
-   ./build_minimal.sh
-   ```
+Rebuild `pydipcc` after changing Python, PyTorch variant, architecture, or the
+native toolchain.

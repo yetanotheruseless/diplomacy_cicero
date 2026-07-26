@@ -12,7 +12,6 @@
         "dipcc/python/profile_game.py",
         "dipcc/python/repro_crash.py",
         "dipcc/python/test_thread_pool.py",
-        "dipcc/setup.py",
         "fairdiplomacy/action_generation.py",
         "fairdiplomacy/action_generation_test.py",
         "fairdiplomacy/agents/__init__.py",
@@ -47,7 +46,6 @@
         "parlai_diplomacy/utils/nucleus_scoring_helpers.py",
         "parlai_diplomacy/wrappers/classifiers.py",
         "run.py",
-        "setup.py",
         "unit_tests/test_discriminator_teacher_functions.py"
     ]
 }

@@ -3,7 +3,6 @@
 .gitignore
 .gitattributes
 .github/
-.circleci/
 .doctrack/
 
 # Local editor and operating-system state

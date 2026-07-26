@@ -27,8 +27,8 @@ CFR search over ``rl_search_orders.ckpt`` and ``rl_value_function.ckpt``. The
 models come from the ``cicero-models`` Volume.
 
 Deploy + verify:
-  modal deploy modal_serve.py
-  modal run modal_serve.py::verify        # health + /rpc get_orders + scale-to-zero
+  uvx modal deploy modal_serve.py
+  ORACLE_TOKEN=<token> uvx modal run modal_serve.py::verify
 """
 
 import os
@@ -39,7 +39,7 @@ import time
 import modal
 
 # Reuse the validated modern image + the models Volume from modal_modern.py.
-from modal_modern import (  # noqa: E402
+from modal_modern import (
     CUDA_VERSION,
     PROTOBUF_VERSION,
     PROTOC_VERSION,
@@ -100,9 +100,9 @@ STARTUP_TIMEOUT = int(os.environ.get("ORACLE_STARTUP_TIMEOUT", "900"))
 MIN_CONTAINERS = int(os.environ.get("ORACLE_MIN_CONTAINERS", "0"))
 
 
-# Serving-only visualization dependencies pulled in by the get_orders path.
-# Added after the canonical runtime build so they do not invalidate pydipcc.
-SERVING_RUNTIME_DEPS = ["Pillow", "matplotlib"]
+# Matplotlib is reached only by the oracle's get_orders integration. Pillow is
+# already constrained by the canonical dialogue extra.
+SERVING_RUNTIME_DEPS = ["matplotlib==3.11.1"]
 
 
 def _serving_image() -> modal.Image:
@@ -126,7 +126,7 @@ def _serving_image() -> modal.Image:
     return img
 
 
-def _oracle_argv(token: str) -> list:
+def _oracle_argv() -> list[str]:
     """argv for oracle_server.py serving the configured TIERS over HTTP on PORT.
 
     - imitation: base_strategy_model agent; `policy` = blueprint distribution sampled from the
@@ -221,7 +221,7 @@ class CiceroModernOracle:
         env.setdefault("PYTHONPATH", "/app")
         env["ORACLE_TOKEN"] = token
         env.setdefault("OMP_NUM_THREADS", "8")
-        argv = _oracle_argv(token)
+        argv = _oracle_argv()
         print(
             "[enter] launching modern oracle "
             f"(Python {PYTHON_VERSION}, torch {TORCH_VERSION} cu130/CUDA {CUDA_VERSION}, "
@@ -239,7 +239,7 @@ class CiceroModernOracle:
     def web(self) -> None:
         """Expose the oracle's port. The subprocess (from _start) listens on it;
         Modal proxies. Empty body — web_server only needs the port open in time."""
-        return None
+        return
 
     @modal.exit()
     def _stop(self) -> None:
@@ -319,20 +319,21 @@ def info() -> None:
         print(f"  URL              = (deploy first; {type(exc).__name__}: {exc})")
     print()
     print(
-        "Deploy:  ORACLE_TOKEN=<tok> modal deploy modal_serve.py   (set token as a Secret for stability)"
+        "Deploy:  uvx modal deploy modal_serve.py   (requires the cicero-oracle-token Secret)"
     )
-    print("Verify:  modal run modal_serve.py::verify")
+    print("Verify:  ORACLE_TOKEN=<tok> uvx modal run modal_serve.py::verify")
     print("Runner:  point --modal-url at the URL, token via ORACLE_TOKEN.")
 
 
 @app.local_entrypoint()
 def verify(url: str = "", token: str = "") -> None:
-    """Cold-start health + a real /rpc get_orders + scale-to-zero confirmation.
+    """Verify cold start, authentication, real orders, and scale-to-zero.
 
     Pass --url/--token to hit an already-deployed Function; otherwise resolves the
     URL from the class and uses ORACLE_TOKEN from the env.
     """
     import json
+    import urllib.error
     import urllib.request
 
     url = (url or _web_url()).rstrip("/")
@@ -341,16 +342,22 @@ def verify(url: str = "", token: str = "") -> None:
         raise ValueError("ORACLE_TOKEN or --token is required for verification")
     print(f"[verify] url={url} token={'set' if token else 'MISSING'}")
 
-    def _get(path, timeout):
+    def _get(path: str, timeout: float) -> tuple[int, dict]:
         with urllib.request.urlopen(url + path, timeout=timeout) as r:
             return r.status, json.loads(r.read().decode())
 
-    def _rpc(method, params, timeout):
+    def _rpc(
+        method: str,
+        params: dict,
+        timeout: float,
+        *,
+        bearer: str = token,
+    ) -> dict:
         body = json.dumps({"id": 1, "method": method, "params": params}).encode()
         req = urllib.request.Request(
             url + "/rpc",
             data=body,
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {bearer}"},
         )
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode())
@@ -362,21 +369,39 @@ def verify(url: str = "", token: str = "") -> None:
         try:
             code, payload = _get("/health", timeout=30)
             print(f"[verify] /health -> {code} {payload}")
-            if code == 200:
+            if code == 200 and payload.get("status") == "ok" and payload.get("ready") is True:
                 break
+            last = RuntimeError(f"health endpoint returned a non-ready payload: {payload}")
         except Exception as exc:  # noqa: BLE001
             last = exc
             time.sleep(5)
     else:
         raise RuntimeError(f"/health never became ready: {last}")
 
-    # 2) info
+    # 2) authentication must fail closed before exercising valid RPC calls.
+    try:
+        _rpc("info", {}, timeout=120, bearer="cicero-verifier-invalid-token")
+    except urllib.error.HTTPError as exc:
+        if exc.code != 401:
+            raise RuntimeError(f"invalid bearer token returned HTTP {exc.code}, expected 401") from exc
+        print("[verify] invalid bearer token -> 401")
+    else:
+        raise RuntimeError("invalid bearer token was accepted")
+
+    # 3) info
     info_resp = _rpc("info", {}, timeout=120)
     if not info_resp.get("ok"):
         raise RuntimeError(f"info RPC failed: {info_resp.get('error')}")
+    configured_tiers = set(TIERS)
+    reported_tiers = set(info_resp.get("result", {}).get("tiers", []))
+    if not configured_tiers.issubset(reported_tiers):
+        raise RuntimeError(
+            f"info RPC omitted configured tiers: expected {sorted(configured_tiers)}, "
+            f"got {sorted(reported_tiers)}"
+        )
     print(f"[verify] info -> {json.dumps(info_resp)[:300]}")
 
-    # 3) real get_orders for FRANCE on the opening board, once per configured tier
+    # 4) real get_orders for FRANCE on the opening board, once per configured tier
     game_json = json.dumps(_OPENING_GAME)
     for tier in TIERS:
         res = _rpc(
@@ -392,16 +417,30 @@ def verify(url: str = "", token: str = "") -> None:
             raise RuntimeError(f"get_orders({tier}) returned invalid orders: {orders!r}")
     print(f"[verify] PASS: modern Cicero served valid orders for {', '.join(TIERS)}")
 
-    # 4) scale-to-zero: wait past the window, then check task count via `modal app list`
+    # 5) scale-to-zero: wait past the window, then assert active app task counts.
     print(f"[verify] waiting {SCALEDOWN_WINDOW + 60}s for scale-to-zero ...")
     time.sleep(SCALEDOWN_WINDOW + 60)
     import subprocess as sp
 
-    out = sp.run(["modal", "app", "list"], capture_output=True, text=True)
+    out = sp.run(
+        ["modal", "app", "list", "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     if out.returncode != 0:
         raise RuntimeError(f"`modal app list` failed: {out.stderr.strip()}")
-    print("[verify] `modal app list` (look for cicero-modern-oracle tasks=0):")
-    for line in out.stdout.splitlines():
-        if "cicero-modern-oracle" in line or "App ID" in line or "Tasks" in line:
-            print("   " + line)
-    print("[verify] done — confirm the app shows 0 running tasks above.")
+    rows = json.loads(out.stdout)
+    active_rows = [
+        row
+        for row in rows
+        if row.get("Description") == "cicero-modern-oracle" and row.get("State") != "stopped"
+    ]
+    if not active_rows:
+        raise RuntimeError("no active cicero-modern-oracle app found after verification")
+    busy_rows = [row for row in active_rows if int(row.get("Tasks", -1)) != 0]
+    if busy_rows:
+        app_tasks = {row.get("App ID"): row.get("Tasks") for row in busy_rows}
+        raise RuntimeError(f"oracle did not scale to zero: {app_tasks}")
+    app_ids = ", ".join(str(row.get("App ID")) for row in active_rows)
+    print(f"[verify] scale-to-zero PASS: {app_ids} tasks=0")

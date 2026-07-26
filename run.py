@@ -6,23 +6,19 @@
 #
 import logging
 import os
-from typing import Dict
 import socket
-import torch
+
 import numpy as np
-
-from fairdiplomacy.agents import build_agent_from_cfg
-from fairdiplomacy.agents.base_agent import BaseAgent
-from fairdiplomacy.compare_agents import run_1v6_trial, run_1v6_trial_multiprocess
-from fairdiplomacy.compare_agent_population import run_population_trial
-from fairdiplomacy.models.base_strategy_model import train_sl
-from fairdiplomacy.models.consts import POWERS
-
-from fairdiplomacy.situation_check import run_situation_check_from_cfg
-from fairdiplomacy.typedefs import Power
+import torch
 
 import heyhi
-
+from fairdiplomacy.agents import build_agent_from_cfg
+from fairdiplomacy.agents.base_agent import BaseAgent
+from fairdiplomacy.compare_agent_population import run_population_trial
+from fairdiplomacy.compare_agents import run_1v6_trial, run_1v6_trial_multiprocess
+from fairdiplomacy.models.consts import POWERS
+from fairdiplomacy.situation_check import run_situation_check_from_cfg
+from fairdiplomacy.typedefs import Power
 
 TASKS = {}
 
@@ -67,10 +63,10 @@ def compare_agent_population(cfg):
         torch.manual_seed(cfg.seed)
         np.random.seed(cfg.seed)
 
-    agent_mappings: Dict[str, BaseAgent] = {
+    agent_mappings: dict[str, BaseAgent] = {
         agent.key: build_agent_from_cfg(agent.value) for agent in cfg.agents
     }
-    power_agent_dict: Dict[Power, BaseAgent] = {
+    power_agent_dict: dict[Power, BaseAgent] = {
         pwr: agent_mappings[getattr(cfg, f"agent_{pwr}")] for pwr in POWERS
     }
 
@@ -83,6 +79,10 @@ def compare_agent_population(cfg):
 
 @_register
 def train(cfg):
+    # The supported inference image intentionally omits wandb/tensorboard.
+    # Import the supervised-training stack only when this task is selected.
+    from fairdiplomacy.models.base_strategy_model import train_sl
+
     train_sl.run_with_cfg(cfg)
 
 

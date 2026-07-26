@@ -7,10 +7,10 @@ all: compile
 # Check for required dependencies
 check_deps:
 	@echo "Checking for required dependencies..."
-	@which cmake > /dev/null || (echo "Error: cmake not found. Run scripts/install_dependencies.sh to install" && exit 1)
-	@which ninja > /dev/null || (echo "Error: ninja not found. Install ninja-build" && exit 1)
-	@which protoc > /dev/null || (echo "Error: protoc not found. Run scripts/install_dependencies.sh to install" && exit 1)
-	@which protoc-gen-mypy > /dev/null || (echo "Error: protoc-gen-mypy not found. Install the build extra" && exit 1)
+	@command -v cmake > /dev/null || (echo "Error: cmake 3.28+ is required; use the canonical Dockerfile or install it before scripts/modernize_setup.sh" && exit 1)
+	@command -v ninja > /dev/null || (echo "Error: ninja is required; use the canonical Dockerfile or install ninja-build" && exit 1)
+	@command -v protoc > /dev/null || (echo "Error: protoc 35.1 is required; run scripts/modernize_setup.sh or scripts/install_protoc.sh" && exit 1)
+	@command -v protoc-gen-mypy > /dev/null || (echo "Error: protoc-gen-mypy is required; install the project build extra" && exit 1)
 	@echo "Dependencies OK"
 
 # Build the supported inference and dialogue runtime.

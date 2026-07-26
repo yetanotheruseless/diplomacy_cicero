@@ -1,292 +1,99 @@
-# Docker Release Process for Diplomacy Cicero
+# Docker Release Process
 
-This document outlines the process for creating, tagging, and releasing Docker images for the Diplomacy Cicero project.
+This repository builds two artifacts from one supported stack:
 
-## Release Workflow
+- `cpu-build` — Ubuntu 24.04 with `torch==2.13.0+cpu`
+- `cuda-runtime` — Ubuntu 24.04/CUDA 13.0 with
+  `torch==2.13.0+cu130`
 
-The Docker release process involves the following steps:
+Model weights are not embedded in either image.
 
-1. Build and test Docker images for various platforms
-2. Tag images with appropriate version numbers
-3. Push images to a container registry
-4. Update documentation and references
+## Preconditions
 
-## Version Naming Convention
+Before tagging a release:
 
-We use semantic versioning (SemVer) for Docker image tags:
+1. the CPU GitHub Actions job must pass;
+2. the `cuda-runtime` target must construct;
+3. B5 and B1 must pass on the release commit;
+4. B2/B3 must pass on a CUDA 13-compatible GPU; and
+5. documentation and exact version assertions must match the Dockerfile.
 
-```
-diplomacy_cicero:[version]-[arch]-[build]
-```
+Historical cu124 or earlier-protoc logs do not satisfy these gates.
 
-Where:
-- `version`: Follows the format `major.minor.patch` (e.g., `1.0.0`)
-- `arch`: CPU architecture (`x86_64` or `arm64`)
-- `build`: Build type (`full` or `minimal`)
+## Local release candidate
 
-Examples:
-- `diplomacy_cicero:1.0.0-x86_64-full`
-- `diplomacy_cicero:1.0.0-arm64-minimal`
+Replace `<version>` with the intended immutable release tag:
 
-The `latest` tag should always point to the most recent stable release.
-
-## Build Types
-
-We provide two build types:
-
-1. **Full**: Includes all dependencies and model weights
-2. **Minimal**: Includes only the core components without model weights
-
-## Build Process
-
-1. **Prepare Environment**
-
-   ```bash
-   # Checkout the appropriate release branch or tag
-   git checkout v1.0.0
-   
-   # Create a build directory for the release
-   mkdir -p release
-   ```
-
-2. **Build Images for Different Architectures**
-
-   ```bash
-   # For x86_64 architecture (Intel/AMD)
-   ./scripts/docker_build.sh --jobs 4 --tag "1.0.0-x86_64-full"
-   
-   # For ARM64 architecture (Apple Silicon/AWS Graviton)
-   ./scripts/docker_build.sh --jobs 4 --tag "1.0.0-arm64-full"
-   ```
-
-3. **Test Images**
-
-   ```bash
-   # Run validation tests on the built image
-   docker run --rm diplomacy_cicero:1.0.0-x86_64-full python /app/test_pydipcc.py
-   docker run --rm diplomacy_cicero:1.0.0-x86_64-full make test_fast
-   ```
-
-4. **Create Manifests for Multi-Architecture Support**
-
-   ```bash
-   # Create and push the manifest for the release version
-   docker manifest create diplomacy_cicero:1.0.0 \
-     diplomacy_cicero:1.0.0-x86_64-full \
-     diplomacy_cicero:1.0.0-arm64-full
-   
-   docker manifest push diplomacy_cicero:1.0.0
-   
-   # Update the latest tag
-   docker manifest create diplomacy_cicero:latest \
-     diplomacy_cicero:1.0.0-x86_64-full \
-     diplomacy_cicero:1.0.0-arm64-full
-   
-   docker manifest push diplomacy_cicero:latest
-   ```
-
-## Release Checklist
-
-Before releasing a new Docker image:
-
-- [ ] Ensure all tests pass
-- [ ] Verify the module loading works on all target architectures
-- [ ] Check that the image size is reasonable
-- [ ] Validate the protobuf compilation
-- [ ] Test model weight downloading and integration
-- [ ] Update documentation with new version information
-
-## Docker Hub Integration
-
-To push images to Docker Hub:
-
-1. **Login to Docker Hub**
-
-   ```bash
-   docker login
-   ```
-
-2. **Tag Images for Docker Hub**
-
-   ```bash
-   docker tag diplomacy_cicero:1.0.0-x86_64-full yourorg/diplomacy_cicero:1.0.0-x86_64-full
-   docker tag diplomacy_cicero:1.0.0-arm64-full yourorg/diplomacy_cicero:1.0.0-arm64-full
-   ```
-
-3. **Push Images**
-
-   ```bash
-   docker push yourorg/diplomacy_cicero:1.0.0-x86_64-full
-   docker push yourorg/diplomacy_cicero:1.0.0-arm64-full
-   ```
-
-4. **Create and Push Manifests**
-
-   ```bash
-   docker manifest create yourorg/diplomacy_cicero:1.0.0 \
-     yourorg/diplomacy_cicero:1.0.0-x86_64-full \
-     yourorg/diplomacy_cicero:1.0.0-arm64-full
-   
-   docker manifest push yourorg/diplomacy_cicero:1.0.0
-   ```
-
-## GitHub Container Registry Integration
-
-To use GitHub Container Registry instead:
-
-1. **Login to GitHub Container Registry**
-
-   ```bash
-   echo $GITHUB_TOKEN | docker login ghcr.io -u $GITHUB_USERNAME --password-stdin
-   ```
-
-2. **Tag Images for GitHub Container Registry**
-
-   ```bash
-   docker tag diplomacy_cicero:1.0.0-x86_64-full ghcr.io/yourorg/diplomacy_cicero:1.0.0-x86_64-full
-   docker tag diplomacy_cicero:1.0.0-arm64-full ghcr.io/yourorg/diplomacy_cicero:1.0.0-arm64-full
-   ```
-
-3. **Push Images**
-
-   ```bash
-   docker push ghcr.io/yourorg/diplomacy_cicero:1.0.0-x86_64-full
-   docker push ghcr.io/yourorg/diplomacy_cicero:1.0.0-arm64-full
-   ```
-
-## Automation with GitHub Actions
-
-For automated builds and releases, you can set up GitHub Actions workflows. Here's a sample workflow file:
-
-```yaml
-name: Docker Release
-
-on:
-  release:
-    types: [published]
-
-jobs:
-  build-and-push:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, self-hosted-arm64]
-        build-type: [full, minimal]
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v2
-      
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v1
-      
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v1
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v3
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-      
-      - name: Determine architecture
-        id: arch
-        run: |
-          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
-            echo "::set-output name=arch::x86_64"
-          else
-            echo "::set-output name=arch::arm64"
-          fi
-      
-      - name: Build and push
-        uses: docker/build-push-action@v2
-        with:
-          context: .
-          file: Dockerfile.unified
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}-${{ steps.arch.outputs.arch }}-${{ matrix.build-type }}
-          build-args: |
-            DIPCC_BUILD_JOBS=4
-```
-
-## Troubleshooting Release Issues
-
-### Common Issues
-
-1. **Missing Dependencies in Docker Images**
-
-   If dependencies are missing, update the Dockerfile:
-
-   ```bash
-   # Add missing dependencies
-   RUN apt-get update && apt-get install -y \
-       missing-package-1 \
-       missing-package-2
-   ```
-
-2. **Platform Compatibility Issues**
-
-   Ensure proper cross-compilation flags are set for ARM64 builds:
-
-   ```bash
-   # Add platform-specific compiler flags
-   ENV CFLAGS="-march=armv8-a"
-   ```
-
-3. **Model Weight Integration**
-
-   If model weights aren't being downloaded:
-
-   ```bash
-   # Test the model weight downloader
-   docker run --rm diplomacy_cicero:1.0.0 bash bin/download_model_files.sh <PASSWORD>
-   ```
-
-## Resource Requirements
-
-Different versions of the Docker image have different resource requirements:
-
-| Version | CPU Cores | RAM | Disk Space |
-|---------|-----------|-----|------------|
-| Full    | 4+        | 8GB+ | 20GB+      |
-| Minimal | 2+        | 4GB+ | 5GB+       |
-
-## Release Notes Template
-
-When publishing a new release, use this template for the release notes:
-
-```markdown
-# Diplomacy Cicero Docker Release v1.0.0
-
-## Images
-- `diplomacy_cicero:1.0.0-x86_64-full` - Full version for x86_64
-- `diplomacy_cicero:1.0.0-arm64-full` - Full version for ARM64
-- `diplomacy_cicero:1.0.0-x86_64-minimal` - Minimal version for x86_64
-- `diplomacy_cicero:1.0.0-arm64-minimal` - Minimal version for ARM64
-
-## Changes
-- [List major changes in this release]
-
-## System Requirements
-- [Document resource requirements]
-
-## Installation
 ```bash
-docker pull ghcr.io/yourorg/diplomacy_cicero:1.0.0
+docker buildx build \
+  --platform linux/amd64 \
+  --target cpu-build \
+  --load \
+  -t diplomacy-cicero:<version>-cpu .
+
+docker run --rm diplomacy-cicero:<version>-cpu \
+  ./scripts/verify_full_build.sh --accelerator cpu
+
+docker buildx build \
+  --platform linux/amd64 \
+  --target cuda-runtime \
+  --load \
+  -t diplomacy-cicero:<version>-cu130 .
 ```
 
-## Known Issues
-- [Document any known issues]
+On a GPU host:
+
+```bash
+docker run --rm --gpus all diplomacy-cicero:<version>-cu130 \
+  ./scripts/verify_full_build.sh --accelerator cuda --require-gpu
 ```
 
-## Conclusion
+## Publish
 
-Following this release process will ensure consistent, reliable Docker image releases for the Diplomacy Cicero project. The multi-architecture support will allow users to run the project on various hardware platforms, and the versioning scheme will help users track and use specific releases.
+Choose a registry namespace and authenticate. For GitHub Container Registry:
+
+```bash
+printf '%s' "$GITHUB_TOKEN" | \
+  docker login ghcr.io -u "$GITHUB_USER" --password-stdin
+
+docker tag \
+  diplomacy-cicero:<version>-cpu \
+  ghcr.io/<owner>/diplomacy-cicero:<version>-cpu
+docker tag \
+  diplomacy-cicero:<version>-cu130 \
+  ghcr.io/<owner>/diplomacy-cicero:<version>-cu130
+
+docker push ghcr.io/<owner>/diplomacy-cicero:<version>-cpu
+docker push ghcr.io/<owner>/diplomacy-cicero:<version>-cu130
+```
+
+Record the content digests printed by the registry. Deploy by digest when
+reproducibility matters.
+
+## Release metadata
+
+Release notes should include:
+
+- source commit SHA;
+- CPU and CUDA image digests;
+- Python, Torch, CUDA, NumPy, protobuf, protoc, and ParlAI versions;
+- CPU verification result;
+- GPU model and B2/B3 call identifier;
+- checkpoint set used by B1; and
+- known limitations.
+
+## Checklist
+
+- [ ] Source tree is clean at the release commit
+- [ ] `cpu-build` passes `verify_full_build.sh --accelerator cpu`
+- [ ] `cuda-runtime` builds from the same commit
+- [ ] CUDA verifier passes with `--require-gpu`
+- [ ] B5 returns its adjudication sentinel
+- [ ] B1 loads all four checkpoints
+- [ ] B2/B3 return the exact PASS result
+- [ ] Image tags and digests are recorded
+- [ ] Model weights are absent from image layers
+- [ ] Release notes link to the evidence
+
+Do not publish a generic `latest` tag until an explicit project policy defines
+how it is advanced and rolled back.
