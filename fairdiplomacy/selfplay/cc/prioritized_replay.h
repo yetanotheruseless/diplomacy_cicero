@@ -15,9 +15,25 @@ LICENSE file in the root directory of this source tree.
 
 #pragma once
 
+#include <algorithm>
+#include <atomic>
+#include <cassert>
+#include <cmath>
+#include <condition_variable>
+#include <cstdint>
+#include <cstdio>
 #include <future>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <mutex>
+#include <optional>
+#include <queue>
 #include <random>
+#include <stdexcept>
 #include <string>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 #include "serialization.h"
@@ -26,12 +42,74 @@ LICENSE file in the root directory of this source tree.
 using namespace rela;
 
 namespace buffer {
+inline int validate_replay_capacity(int capacity) {
+  if (capacity <= 0) {
+    throw std::invalid_argument("Replay capacity must be positive");
+  }
+  return capacity;
+}
+
+inline int replay_storage_capacity(int capacity) {
+  validate_replay_capacity(capacity);
+  const int extra_capacity = std::max(1, capacity / 4);
+  if (capacity > std::numeric_limits<int>::max() - extra_capacity) {
+    throw std::invalid_argument("Replay capacity is too large");
+  }
+  return capacity + extra_capacity;
+}
+
+inline int validate_prefetch(int prefetch) {
+  if (prefetch < 0) {
+    throw std::invalid_argument("Replay prefetch count cannot be negative");
+  }
+  return prefetch;
+}
+
+inline float validate_priority_exponent(float exponent, const char *name) {
+  if (!std::isfinite(exponent) || exponent < 0.0F) {
+    throw std::invalid_argument(std::string("Replay ") + name +
+                                " must be finite and non-negative");
+  }
+  return exponent;
+}
+
+inline void validate_priorities(const torch::Tensor &priorities,
+                                int64_t expected_size,
+                                const char *operation) {
+  const std::string prefix = std::string(operation) + " priorities must ";
+  if (!priorities.defined()) {
+    throw std::invalid_argument(prefix + "be a defined tensor");
+  }
+  if (!priorities.device().is_cpu()) {
+    throw std::invalid_argument(prefix + "be on the CPU");
+  }
+  if (priorities.scalar_type() != torch::kFloat32) {
+    throw std::invalid_argument(prefix + "have dtype torch.float32");
+  }
+  if (priorities.dim() != 1) {
+    throw std::invalid_argument(prefix + "be one-dimensional");
+  }
+  if (priorities.size(0) != expected_size) {
+    throw std::invalid_argument(prefix + "match the number of samples");
+  }
+  if (!priorities.is_contiguous()) {
+    throw std::invalid_argument(prefix + "be contiguous");
+  }
+  if (!torch::isfinite(priorities).all().item<bool>()) {
+    throw std::invalid_argument(prefix + "contain only finite values");
+  }
+  if (!(priorities > 0).all().item<bool>()) {
+    throw std::invalid_argument(prefix + "contain only positive values");
+  }
+}
+
 template <class DataType> class ConcurrentQueue {
 public:
   ConcurrentQueue(int capacity)
-      : capacity(capacity), total_bytes_(0), total_numel_(0), head_(0),
-        tail_(0), size_(0), safe_tail_(0), safe_size_(0), sum_(0),
-        evicted_(capacity, false), elements_(capacity), weights_(capacity, 0) {}
+      : capacity(validate_replay_capacity(capacity)), total_bytes_(0),
+        total_numel_(0), head_(0), tail_(0), size_(0), safe_tail_(0),
+        safe_size_(0), sum_(0), evicted_(this->capacity, false),
+        elements_(this->capacity), weights_(this->capacity, 0) {}
 
   int safe_size(float *sum) const {
     std::unique_lock<std::mutex> lk(m_);
@@ -47,11 +125,22 @@ public:
   }
 
   void block_append(const std::vector<DataType> &block,
-                    const torch::Tensor &weights) {
-    int block_size = block.size();
+                    const torch::Tensor &weights,
+                    bool require_empty = false) {
+    if (block.size() > static_cast<size_t>(capacity)) {
+      throw std::runtime_error(
+          "Replay block exceeds the configured storage capacity");
+    }
+    const int block_size = static_cast<int>(block.size());
+    validate_priorities(weights, block_size, "Replay append");
 
     std::unique_lock<std::mutex> lk(m_);
-    cv_size_.wait(lk, [=] { return size_ + block_size <= capacity; });
+    if (require_empty && size_ != 0) {
+      throw std::runtime_error(
+          "Cannot load a replay buffer into non-empty storage");
+    }
+    cv_size_.wait(
+        lk, [this, block_size] { return size_ + block_size <= capacity; });
 
     int start = tail_;
     int end = (tail_ + block_size) % capacity;
@@ -64,7 +153,6 @@ public:
 
     float sum = 0;
     auto weight_acc = weights.accessor<float, 1>();
-    assert(weight_acc.size(0) == block_size);
     int64_t numel = 0;
     int64_t bytes = 0;
     for (int i = 0; i < block_size; ++i) {
@@ -84,7 +172,7 @@ public:
 
     lk.lock();
 
-    cv_tail_.wait(lk, [=] { return safe_tail_ == start; });
+    cv_tail_.wait(lk, [this, start] { return safe_tail_ == start; });
     safe_tail_ = end;
     safe_size_ += block_size;
     sum_ += sum;
@@ -95,46 +183,40 @@ public:
   }
 
   // ------------------------------------------------------------- //
-  // block_pop, update are thread-safe against block_append
-  // but they are NOT thread-safe against each other
+  // block_pop and update are thread-safe against block_append and each other.
 
   void block_pop(int block_size) {
+    if (block_size < 0) {
+      throw std::invalid_argument("Replay pop size cannot be negative");
+    }
     std::lock_guard<std::mutex> lk(pop_m_);
-    double diff = 0;
-    int head = head_;
-    int64_t numel = 0;
-    int64_t bytes = 0;
-    for (int i = 0; i < block_size; ++i) {
-      diff -= weights_[head];
-      evicted_[head] = true;
-      tensor_dict::for_each(elements_[head], [&numel](const torch::Tensor &t) {
-        numel += t.numel();
-      });
-      tensor_dict::for_each(elements_[head], [&bytes](const torch::Tensor &t) {
-        bytes += t.numel() * t.element_size();
-      });
-      head = (head + 1) % capacity;
-    }
-    total_numel_ -= numel;
-    total_bytes_ -= bytes;
+    block_pop_locked(block_size);
+  }
 
-    {
-      std::lock_guard<std::mutex> lk(m_);
-      sum_ += diff;
-      head_ = head;
-      safe_size_ -= block_size;
-      size_ -= block_size;
-      assert(safe_size_ >= 0);
-      check_size(head_, safe_tail_, safe_size_);
+  void trim_to_size(int maximum_size) {
+    if (maximum_size < 0) {
+      throw std::invalid_argument("Replay trim size cannot be negative");
     }
-    cv_size_.notify_all();
+    std::lock_guard<std::mutex> lk(pop_m_);
+    int block_size = 0;
+    {
+      std::lock_guard<std::mutex> state_lk(m_);
+      block_size = std::max(0, safe_size_ - maximum_size);
+    }
+    block_pop_locked(block_size);
   }
 
   void update(const std::vector<int> &ids, const torch::Tensor &weights) {
+    validate_priorities(weights, static_cast<int64_t>(ids.size()),
+                        "Replay update");
+    std::lock_guard<std::mutex> pop_lk(pop_m_);
     double diff = 0;
     auto weight_acc = weights.accessor<float, 1>();
     for (int i = 0; i < (int)ids.size(); ++i) {
       auto id = ids[i];
+      if (id < 0 || id >= capacity) {
+        throw std::out_of_range("Replay update id is outside storage");
+      }
       if (evicted_[id]) {
         continue;
       }
@@ -161,7 +243,9 @@ public:
   }
 
   float get_weight(int idx, int *id) {
-    assert(id != nullptr);
+    if (id == nullptr) {
+      throw std::invalid_argument("Replay weight id output cannot be null");
+    }
     *id = (head_ + idx) % capacity;
     return weights_[*id];
   }
@@ -170,27 +254,60 @@ public:
     // making a full copy as most of the memory are in tensors, not maps.
     std::vector<DataType> elements_copy;
     {
-      std::lock_guard<std::mutex> lk(pop_m_);
+      // Keep the same pop_m_ -> m_ lock order as block_pop. The state lock
+      // makes head_/safe_size_ and the committed range one coherent snapshot
+      // while an append is reserving or publishing ring-buffer slots.
+      std::lock_guard<std::mutex> pop_lk(pop_m_);
+      std::lock_guard<std::mutex> state_lk(m_);
       int head = head_;
       const int size = safe_size_;
       elements_copy.resize(size);
       for (int i = 0; i < size; ++i) {
-        elements_copy[i] = elements_[i];
+        elements_copy[i] = elements_[head];
         head = (head + 1) % capacity;
       }
     }
 
     FILE *stream = fopen(fpath.c_str(), "wb");
-    write(elements_copy, stream);
-    fclose(stream);
+    if (stream == nullptr) {
+      throw std::runtime_error("Unable to open replay buffer for writing: " +
+                               fpath);
+    }
+    try {
+      write(elements_copy, stream);
+    } catch (...) {
+      fclose(stream);
+      throw;
+    }
+    if (fclose(stream) != 0) {
+      throw std::runtime_error("Unable to close replay buffer after writing: " +
+                               fpath);
+    }
   }
 
-  size_t load(const std::string &fpath) {
+  size_t load(const std::string &fpath, int maximum_elements) {
+    if (maximum_elements < 0 || maximum_elements > capacity) {
+      throw std::invalid_argument(
+          "Replay load limit must fit the configured storage capacity");
+    }
     FILE *stream = fopen(fpath.c_str(), "rb");
-    const auto elements = read(stream);
-    fclose(stream);
+    if (stream == nullptr) {
+      throw std::runtime_error("Unable to open replay buffer for reading: " +
+                               fpath);
+    }
+    std::vector<DataType> elements;
+    try {
+      elements = read(stream, maximum_elements);
+    } catch (...) {
+      fclose(stream);
+      throw;
+    }
+    if (fclose(stream) != 0) {
+      throw std::runtime_error("Unable to close replay buffer after reading: " +
+                               fpath);
+    }
     const auto weights = torch::ones({(int)elements.size()});
-    block_append(elements, weights);
+    block_append(elements, weights, /*require_empty=*/true);
     return elements.size();
   }
 
@@ -199,21 +316,54 @@ public:
   std::atomic<int64_t> total_numel_;
 
 private:
+  void block_pop_locked(int block_size) {
+    {
+      std::lock_guard<std::mutex> state_lk(m_);
+      if (block_size > safe_size_) {
+        throw std::out_of_range(
+            "Replay pop size exceeds the committed storage size");
+      }
+    }
+    double diff = 0;
+    int head = head_;
+    int64_t numel = 0;
+    int64_t bytes = 0;
+    for (int i = 0; i < block_size; ++i) {
+      diff -= weights_[head];
+      evicted_[head] = true;
+      tensor_dict::for_each(elements_[head], [&numel](const torch::Tensor &t) {
+        numel += t.numel();
+      });
+      tensor_dict::for_each(elements_[head], [&bytes](const torch::Tensor &t) {
+        bytes += t.numel() * t.element_size();
+      });
+      head = (head + 1) % capacity;
+    }
+    total_numel_ -= numel;
+    total_bytes_ -= bytes;
+
+    {
+      std::lock_guard<std::mutex> lk(m_);
+      sum_ += diff;
+      head_ = head;
+      safe_size_ -= block_size;
+      size_ -= block_size;
+      check_size(head_, safe_tail_, safe_size_);
+    }
+    cv_size_.notify_all();
+  }
+
   void check_size(int head, int tail, int size) {
+    bool valid = false;
     if (size == 0) {
-      assert(tail == head);
+      valid = tail == head;
     } else if (tail > head) {
-      if (tail - head != size) {
-        std::cout << "tail-head: " << tail - head << " vs size: " << size
-                  << std::endl;
-      }
-      assert(tail - head == size);
+      valid = tail - head == size;
     } else {
-      if (tail + capacity - head != size) {
-        std::cout << "tail-head: " << tail + capacity - head
-                  << " vs size: " << size << std::endl;
-      }
-      assert(tail + capacity - head == size);
+      valid = tail + capacity - head == size;
+    }
+    if (!valid) {
+      throw std::logic_error("Replay ring-buffer size invariant failed");
     }
   }
   mutable std::mutex m_;
@@ -238,31 +388,41 @@ template <class DataType> class PrioritizedReplay {
 public:
   PrioritizedReplay(int capacity, int seed, float alpha, float beta,
                     int prefetch, bool shuffle = false)
-      : alpha_(alpha) // priority exponent
+      : alpha_(validate_priority_exponent(alpha, "alpha")) // priority exponent
         ,
-        beta_(beta) // importance sampling exponent
+        beta_(validate_priority_exponent(beta,
+                                         "beta")) // importance sampling exponent
         ,
-        prefetch_(prefetch), shuffle_cross_chunks_(shuffle),
-        capacity_(capacity), storage_(int(1.25 * capacity)), num_add_(0) {
+        prefetch_(validate_prefetch(prefetch)),
+        capacity_(validate_replay_capacity(capacity)),
+        shuffle_cross_chunks_(shuffle), storage_(replay_storage_capacity(capacity)),
+        num_add_(0) {
     rng_.seed(seed);
   }
 
   void add_compressed(const std::vector<DataType> &sample,
                       const torch::Tensor &priority) {
-    assert(priority.dim() == 1);
-    assert(priority.size(0) == (int)sample.size());
+    if (sample.empty()) {
+      throw std::invalid_argument("Replay append requires at least one sample");
+    }
+    validate_priorities(priority, static_cast<int64_t>(sample.size()),
+                        "Replay append");
     auto weights = torch::pow(priority, alpha_);
     storage_.block_append(sample, weights);
     num_add_ += priority.size(0);
   }
 
   void add_one(const DataType &sample, float priority) {
-    add_compressed({sample}, torch::tensor({priority}));
+    add_compressed(
+        {sample},
+        torch::tensor({priority}, torch::TensorOptions().dtype(torch::kFloat32)));
   }
 
   void save(const std::string &fpath) { storage_.save(fpath); }
 
-  void load(const std::string &fpath) { storage_.load(fpath); }
+  void load(const std::string &fpath) {
+    storage_.load(fpath, storage_.capacity);
+  }
 
   std::tuple<std::vector<DataType>, torch::Tensor> get_all_content() {
     std::vector<DataType> samples;
@@ -309,29 +469,38 @@ public:
   // assuming batch is a vector to be added to the replay buffer
   void add_batch(const std::vector<DataType> &vecs,
                  const torch::Tensor &priority) {
-    for (size_t i = 0; i < vecs.size(); i++) {
-      auto priority_accessor = priority.accessor<float, 1>();
-      add_one(vecs[i], priority_accessor[i]);
-    }
+    add_compressed(vecs, priority);
   }
 
   // assuming batch is a vector to be added to the replay buffer
   // async version
   std::future<void> add_batch_async(const std::vector<DataType> &batch,
                                     const torch::Tensor &priority) {
-    auto fut = [=] { add_batch(batch, priority); };
+    auto fut = [this, batch, priority] { add_batch(batch, priority); };
     return std::async(std::launch::async, fut);
   }
 
   std::tuple<DataType, torch::Tensor> sample(int batchsize) {
+    if (batchsize <= 0) {
+      throw std::invalid_argument("Replay sample batch size must be positive");
+    }
     if (!sampled_ids_.empty()) {
-      std::cout << "Error: previous samples' priority has not been updated."
-                << std::endl;
-      assert(false);
+      throw std::logic_error(
+          "Previous replay sample priority has not been updated or kept");
     }
 
-    assert(size() >= batchsize &&
-           "Cannot sample from a buffer that doesn't have even batch");
+    if (size() < batchsize) {
+      throw std::runtime_error(
+          "Replay does not contain enough samples for the requested batch");
+    }
+    if (prefetch_ > 0) {
+      if (prefetch_batch_size_.has_value() &&
+          *prefetch_batch_size_ != batchsize) {
+        throw std::invalid_argument(
+            "Replay prefetch requires a fixed sample batch size");
+      }
+      prefetch_batch_size_ = batchsize;
+    }
 
     DataType batch;
     torch::Tensor priority;
@@ -359,8 +528,11 @@ public:
   }
 
   void update_priority(const torch::Tensor &priority) {
-    assert(priority.dim() == 1);
-    assert((int)sampled_ids_.size() == priority.size(0));
+    if (sampled_ids_.empty()) {
+      throw std::logic_error("Replay has no sampled priorities to update");
+    }
+    validate_priorities(priority, static_cast<int64_t>(sampled_ids_.size()),
+                        "Replay update");
 
     auto weights = torch::pow(priority, alpha_);
     {
@@ -392,6 +564,10 @@ private:
     float sum;
     int size = storage_.safe_size(&sum);
     // storage_ [0, size) remains static in the subsequent section
+    if (size < batchsize || !std::isfinite(sum) || sum <= 0.0F) {
+      throw std::runtime_error(
+          "Replay storage cannot satisfy the requested weighted sample");
+    }
 
     float segment = sum / batchsize;
     std::uniform_real_distribution<float> dist(0.0, segment);
@@ -411,7 +587,9 @@ private:
 
       while (next_idx <= size) {
         if (acc_sum > 0 && acc_sum >= rand) {
-          assert(next_idx >= 1);
+          if (next_idx < 1) {
+            throw std::logic_error("Replay sampling index invariant failed");
+          }
           DataType element = storage_.get_element_and_mark(next_idx - 1);
           samples.push_back(element);
           weight_acc[i] = w;
@@ -420,10 +598,8 @@ private:
         }
 
         if (next_idx == size) {
-          std::cout << "next_idx: " << next_idx << "/" << size << std::endl;
-          std::cout << std::setprecision(10) << "acc_sum: " << acc_sum
-                    << ", sum: " << sum << ", rand: " << rand << std::endl;
-          assert(false);
+          throw std::logic_error(
+              "Replay weighted sampling failed to select an element");
         }
 
         w = storage_.get_weight(next_idx, &id);
@@ -431,13 +607,13 @@ private:
         ++next_idx;
       }
     }
-    assert((int)samples.size() == batchsize);
-
-    // pop storage if full
-    size = storage_.size();
-    if (size > capacity_) {
-      storage_.block_pop(size - capacity_);
+    if (static_cast<int>(samples.size()) != batchsize) {
+      throw std::logic_error("Replay returned an incomplete sample batch");
     }
+
+    // Evict only committed entries. Concurrent producers may have reserved
+    // slots that are not yet safe to read or pop.
+    storage_.trim_to_size(capacity_);
 
     // safe to unlock, because <samples> contains copys
     lk.unlock();
@@ -455,7 +631,20 @@ private:
 
     float sum;
     const int size = storage_.safe_size(&sum);
-    const int chunk_size = storage_.get_element(0).begin()->second.size(0);
+    if (size < batchsize) {
+      throw std::runtime_error(
+          "Replay storage cannot satisfy the requested shuffled sample");
+    }
+    const DataType &first_chunk = storage_.get_element(0);
+    if (first_chunk.empty()) {
+      throw std::runtime_error("Replay cannot shuffle an empty tensor mapping");
+    }
+    const torch::Tensor &first_tensor = first_chunk.begin()->second;
+    if (first_tensor.dim() == 0 || first_tensor.size(0) <= 0) {
+      throw std::runtime_error(
+          "Replay shuffled samples require a non-empty leading dimension");
+    }
+    const int chunk_size = first_tensor.size(0);
 
     std::vector<DataType> samples;
     std::uniform_int_distribution<> dist_chunk(0, size - 1);
@@ -466,13 +655,9 @@ private:
       samples.push_back(tensor_dict::index(chunk, index_in_chunk));
     }
 
-    {
-      // pop storage if full
-      auto real_size = storage_.size();
-      if (real_size > capacity_) {
-        storage_.block_pop(real_size - capacity_);
-      }
-    }
+    // Evict only committed entries; an append may have reserved additional
+    // ring slots without publishing them yet.
+    storage_.trim_to_size(capacity_);
 
     // safe to unlock, because <samples> contains copys
     lk.unlock();
@@ -500,6 +685,7 @@ private:
   std::mutex m_sampler_;
   std::vector<int> sampled_ids_;
   std::queue<std::future<SampleWeightIds>> futures_;
+  std::optional<int> prefetch_batch_size_;
 
   std::mt19937 rng_;
   int last_query_ = 0;

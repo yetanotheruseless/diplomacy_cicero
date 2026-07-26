@@ -172,6 +172,26 @@ Those results were valuable feasibility evidence. They do not validate Python
 3.12, Torch 2.13, cu130/CUDA 13.0, or protoc 35.1 and therefore must remain
 labeled historical.
 
+## RELA self-play CPU validation
+
+The optional RELA prioritized-replay extension has a separate reproducible
+Linux/x86-64 CPU gate:
+
+```bash
+modal run modal_selfplay.py
+```
+
+The image pins Ubuntu 24.04, Python 3.12, GCC 13, PyTorch 2.13.0 CPU,
+pybind11 3.0.4, and protobuf 7.35.1. It runs the canonical C++20 build, the
+standalone CTest target, and the binding-level replay tests both while building
+the image and in the remote function. This gate does not claim Postman RPC or a
+CUDA execution test; see [`docs/selfplay_runtime.md`](docs/selfplay_runtime.md).
+
+On 2026-07-26, [Modal run
+`ap-xCrdh9SrR5N68ldb1G4O6d`](https://modal.com/apps/jakemannix/main/ap-xCrdh9SrR5N68ldb1G4O6d)
+passed CTest 1/1 and the Python replay suite 15/15 in both stages on
+Linux/x86-64 with Python 3.12.1, Torch 2.13.0+cpu, and protobuf 7.35.1.
+
 ## Oracle validation
 
 After the runtime gates pass, the scale-to-zero HTTP oracle has its own

@@ -86,6 +86,26 @@ The extension is ABI-coupled to the Python interpreter, PyTorch variant,
 architecture, and native toolchain. A CPU-built extension is not promoted into
 the CUDA image; each image compiles against its final wheel.
 
+### RELA self-play replay
+
+The optional `fairdiplomacy.selfplay.rela` prioritized-replay extension now
+builds directly against the same Python 3.12, PyTorch 2.13, pybind11 3, and
+C++20 contract. It no longer reaches through Postman's legacy submodules for
+pybind11 or GoogleTest and does not hard-code CUDA architectures.
+
+The canonical build and focused test command is:
+
+```bash
+./scripts/build_selfplay.sh
+```
+
+Postman tensor RPC remains a separate opt-in dependency. Its checked-in
+configuration has been probed and fails precisely on uninitialized 2019-era
+gRPC/pybind11 gitlinks after mixing modern interpreter, Python library, and
+Torch discovery. The RELA build does not silently fetch or claim validation for
+that RPC path. See [`docs/selfplay_runtime.md`](docs/selfplay_runtime.md) for the
+exact boundary and probe.
+
 ### Python and checkpoint loading
 
 The project requires Python 3.12 and pins the ABI-sensitive packages. Modern
