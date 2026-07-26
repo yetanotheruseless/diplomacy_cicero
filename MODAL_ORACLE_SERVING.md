@@ -11,7 +11,8 @@ There is no shared/hosted instance — you deploy the oracle into **your own Mod
 workspace**:
 
 ```bash
-modal secret create cicero-oracle-token ORACLE_TOKEN=<a token you generate>
+export ORACLE_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+modal secret create cicero-oracle-token ORACLE_TOKEN="$ORACLE_TOKEN"
 modal deploy modal_serve.py
 ```
 

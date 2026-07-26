@@ -123,43 +123,6 @@ RUN echo "✅ Building dipcc with $DIPCC_BUILD_JOBS parallel jobs..." && \
     cp dipcc/python/pydipcc*.so /app/fairdiplomacy/ && \
     echo "  ✓ Built pydipcc module successfully"
 
-# Configure fairdiplomacy to import pydipcc with cross-platform compatibility
-RUN echo '#!/usr/bin/env python' > /app/fairdiplomacy/__init__.py && \
-    echo 'import sys, os, glob' >> /app/fairdiplomacy/__init__.py && \
-    echo 'import importlib.util' >> /app/fairdiplomacy/__init__.py && \
-    echo '' >> /app/fairdiplomacy/__init__.py && \
-    echo '# Dynamically find pydipcc module regardless of platform suffix' >> /app/fairdiplomacy/__init__.py && \
-    echo 'def load_pydipcc():' >> /app/fairdiplomacy/__init__.py && \
-    echo '    """Dynamically find and load the pydipcc module across different platforms."""' >> /app/fairdiplomacy/__init__.py && \
-    echo '    # First try the standard approach (if dipcc is installed as a package)' >> /app/fairdiplomacy/__init__.py && \
-    echo '    try:' >> /app/fairdiplomacy/__init__.py && \
-    echo '        import dipcc' >> /app/fairdiplomacy/__init__.py && \
-    echo '        sys.modules["fairdiplomacy.pydipcc"] = dipcc' >> /app/fairdiplomacy/__init__.py && \
-    echo '        return dipcc' >> /app/fairdiplomacy/__init__.py && \
-    echo '    except ImportError:' >> /app/fairdiplomacy/__init__.py && \
-    echo '        pass  # Continue to file-based approach' >> /app/fairdiplomacy/__init__.py && \
-    echo '' >> /app/fairdiplomacy/__init__.py && \
-    echo '    # Look for .so files in the current directory' >> /app/fairdiplomacy/__init__.py && \
-    echo '    current_dir = os.path.dirname(__file__)' >> /app/fairdiplomacy/__init__.py && \
-    echo '    so_pattern = os.path.join(current_dir, "pydipcc*.so")' >> /app/fairdiplomacy/__init__.py && \
-    echo '    so_files = glob.glob(so_pattern)' >> /app/fairdiplomacy/__init__.py && \
-    echo '' >> /app/fairdiplomacy/__init__.py && \
-    echo '    if so_files:' >> /app/fairdiplomacy/__init__.py && \
-    echo '        # Use the first one found (could sort by modification time if needed)' >> /app/fairdiplomacy/__init__.py && \
-    echo '        so_path = so_files[0]' >> /app/fairdiplomacy/__init__.py && \
-    echo '        spec = importlib.util.spec_from_file_location("pydipcc", so_path)' >> /app/fairdiplomacy/__init__.py && \
-    echo '        if spec:' >> /app/fairdiplomacy/__init__.py && \
-    echo '            pydipcc = importlib.util.module_from_spec(spec)' >> /app/fairdiplomacy/__init__.py && \
-    echo '            spec.loader.exec_module(pydipcc)' >> /app/fairdiplomacy/__init__.py && \
-    echo '            sys.modules["fairdiplomacy.pydipcc"] = pydipcc' >> /app/fairdiplomacy/__init__.py && \
-    echo '            return pydipcc' >> /app/fairdiplomacy/__init__.py && \
-    echo '' >> /app/fairdiplomacy/__init__.py && \
-    echo '    # If we get here, no module was found' >> /app/fairdiplomacy/__init__.py && \
-    echo '    raise ImportError(f"Could not find pydipcc module. Searched for: {so_pattern}")' >> /app/fairdiplomacy/__init__.py && \
-    echo '' >> /app/fairdiplomacy/__init__.py && \
-    echo '# Load the module and expose it' >> /app/fairdiplomacy/__init__.py && \
-    echo 'pydipcc = load_pydipcc()' >> /app/fairdiplomacy/__init__.py
-
 # PHASE 5: Test the dipcc installation
 # ==============================================
 # Run the pydipcc test
@@ -167,11 +130,14 @@ RUN echo "✅ Testing pydipcc module..." && \
     find /app/fairdiplomacy -name "pydipcc*.so" && \
     python /app/test_pydipcc.py
 
-# PHASE 6: Install additional requirements
+# PHASE 6: Validate the legacy CPU base dependencies
 # ==============================================
-# Install project requirements
-RUN echo "✅ Installing project requirements..." && \
-    pip install -r requirements.txt || echo "  ⚠️ Some requirements could not be installed"
+# requirements.txt describes the original Python 3.7 / Torch 1.7.1 application
+# stack: torchtext==0.8.1 requires torch==1.7.1. Installing it here would
+# replace the Torch 1.10 CPU build dependency. Application dependencies are
+# layered separately by scripts/setup_cicero_macos.sh or the modern Modal image.
+RUN python -m pip check && \
+    python -c "import sys, google.protobuf, numpy, torch; assert sys.version_info[:2] == (3, 8), sys.version; assert google.protobuf.__version__ == '3.19.1', google.protobuf.__version__; assert numpy.__version__ == '1.20.3', numpy.__version__; assert torch.__version__ == '1.10.0+cpu', torch.__version__; assert torch.version.cuda is None, torch.version.cuda"
 
 # PHASE 7: Environment verification
 # ==============================================
@@ -191,7 +157,7 @@ RUN echo "✅ Running comprehensive build verification..." && \
     echo "" && \
     echo "✅ Build complete! Use the following to test the environment:" && \
     echo "  python /app/test_pydipcc.py" && \
-    echo "  ./scripts/verify_full_build.sh --full-test"
+    echo "  ./scripts/verify_full_build.sh"
 
 # Default command
 CMD ["/bin/bash"]
